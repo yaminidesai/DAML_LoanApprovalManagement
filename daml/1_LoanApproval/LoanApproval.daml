@@ -1,0 +1,40 @@
+module LoanApproval where 
+
+template LoanRequest
+  with
+    bank : Party -- Who Approves/Rejects Loan
+    borrower : Party -- who Requests the Loan
+    loanAmount: Decimal -- Loan Amount
+  where 
+    ensure loanAmount > 0.0   -- LoanRequest Amount should be always greater than Zero.
+    signatory borrower -- Borrower is only Authorized here because he is the one requesting the Loan
+    observer  bank -- Bank have rights to Observe
+
+    choice ApproveRequest : ContractId Loan -- Choice to accept the Request
+      controller bank   -- Only Bank can perform this action 
+      do
+      create Loan with  
+        bank 
+        borrower  
+        loanAmount 
+        status = "Approved" -- If Approved status Changed to Approved
+
+    choice RejectRequest : ContractId Loan   -- Choice to reject the Request
+      controller bank   -- Only Bank can perform this action 
+      do 
+      create Loan with 
+        bank 
+        borrower 
+        loanAmount
+        status = "Rejected" -- If Rejected status updates to Rejected
+
+template Loan  -- This is a Loan Template created after the Request Approved or Rejected
+  with
+    bank : Party
+    borrower : Party
+    loanAmount : Decimal 
+    status : Text
+  where
+    signatory bank, borrower  
+
+    
