@@ -1,0 +1,121 @@
+module TokenDisbursement where 
+-- 1. TokenWallet Template 
+template TokenWallet -- Created a Token Wallet account, so the funds will be Deposited and Transfered from here.
+  with 
+    owner : Party
+    issuer  : Party
+    tokenAmount  : Decimal -- This is the Token balance of the wallet
+  where
+    signatory issuer, owner  -- Both parties have access to the TokenWallet
+
+    choice Credit : ContractId  TokenWallet -- Add funds to the TokenWallet
+      with
+        amount : Decimal 
+      controller  issuer
+        do 
+        assertMsg "The amount should be positive" (amount > 0.0) -- Make sures the amount entered is Positive.
+        create this with 
+          tokenAmount = tokenAmount + amount -- Updates the Account Balance by adding the amount 
+
+    choice Debit : ContractId TokenWallet -- Deducts amount from the TokenWallet
+      with 
+        amount : Decimal 
+      controller  owner
+        do 
+        assertMsg "Insufficient balance" (amount <= tokenAmount) -- Make sures the requested amount is in the account.
+        assertMsg " Sent amount should be greater than zero" ( amount > 0.0) -- Make sure the amount is more than zero.
+        create this with 
+          tokenAmount = tokenAmount - amount -- Deducts the funds from thwe account and updates
+                 
+-- 2. Loan Limit Template 
+
+template LoanLimit -- Based on the Individuals Income
+  with 
+    issuer : Party
+    --salary : Decimal -- Asking Income
+    loanLimit : Decimal  -- Considered as Limit for a individual person
+    loanRequested : Decimal --  Considered as a Requested loan amount by a person
+    totalLimit : Decimal --  Total Predefined amount set by the Bank
+  where
+    signatory issuer  -- only bank can control the limits
+
+    choice CheckLimit : ContractId LoanLimit -- Updates the loanLimit and totalLimit
+      with
+        loanAmount : Decimal
+        salary : Decimal
+      controller issuer -- Bank is the Controller
+        do
+        assertMsg "The amount should be 25% of the Salary" (loanAmount <= 0.25 * salary) -- checking the requested loan is 25% of the salary
+        assertMsg "Loan Limit Exceded" (loanAmount <= totalLimit) -- checking the requested amount is under the total loan limit
+        create this with
+          loanLimit = 0.25 * salary --  Gives the Loanlimit amount for a individual
+          totalLimit = totalLimit - loanAmount -- Updates the totalLimit after each LoanApproval
+          loanRequested = loanAmount  -- Updated with the loan amount
+
+-- 3. LoanRequest Template
+
+template LoanRequest -- Borrower requests the loan 
+  with 
+    loanLimitCid : ContractId LoanLimit   -- checking the Loan LoanLimit
+    issuer : Party 
+    owner : Party
+    salary : Decimal -- Takes salary as input
+    loanAmount : Decimal -- Takes input as loanAmount
+    
+  where
+    signatory owner  -- owner requests the loan so owner is signatory
+    observer issuer  -- issuer acts as observer
+    
+    choice ApproveRequest : ContractId Loan -- Choice to accept the Request
+      controller issuer   -- Only issuer can perform this action 
+      do
+      -- Validating the loan limit by taking input salary and loan amount calculating with loan limit template
+      let isValid = loanAmount <= 0.25 * salary 
+      if isValid then do
+      _ <- exercise loanLimitCid CheckLimit with 
+        salary = salary
+        loanAmount = loanAmount  
+      create Loan with   -- creates loan if loan request is under the loan limit
+        issuer 
+        owner 
+        loanAmount = loanAmount
+        disbursedAmount = 0.0
+        status = "Approved" -- If Approved status Changed to Approved
+      else 
+       create Loan with  -- if the loan request amount is over the loanlimit
+         issuer
+         owner 
+         loanAmount = loanAmount
+         disbursedAmount = 0.0
+         status = "Rejected"  -- Updates status as rejected
+
+-- 4.Loan Template
+
+template Loan  -- This is a Loan Template created after the Request Approved or Rejected
+  with
+    issuer : Party
+    owner : Party
+    loanAmount : Decimal
+    disbursedAmount: Decimal
+    status : Text
+  where
+    signatory issuer, owner  -- agreement between issuer and owner
+
+    choice Disburse : ContractId Loan  -- disbursing the approved amount into toekn wallet
+      with
+        disAmount : Decimal 
+        tokenWalletCid : ContractId TokenWallet  -- tokenwallet contract address
+      controller issuer
+      do
+        assertMsg "Disbursement Amount must be positive" (disAmount > 0.0)   -- checking if the disburse amount is greater than zero
+        assertMsg "Disbuesement exceds remaining limit" (disbursedAmount + disAmount <= loanAmount)  -- ensuring disbursed amount doesnt exceed the loan amount
+        _ <- exercise tokenWalletCid Credit with amount = disAmount   -- exercisng the credit choice in tokenwallet
+        create this with 
+         disbursedAmount = disbursedAmount + disAmount -- updating the disburse amount in loan contract
+      
+    
+
+
+
+
+

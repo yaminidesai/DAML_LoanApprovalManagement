@@ -1,0 +1,59 @@
+module TokenDisbScript where   
+
+import TokenDisbursement 
+import Daml.Script 
+
+test_token : Script ()
+test_token = script do 
+ 
+ -- Allocating the parties Issuer,Owner and Bank
+  issuer <- allocateParty "Bank" 
+  owner <- allocateParty "akhil"
+  borrower2 <- allocateParty "Yami"
+
+ -- Initializing the Token Wallet with issuer and owner
+  tokenCid <- submitMulti [issuer, owner] [] do   -- as issuer and owner are signatories
+    createCmd TokenWallet with 
+      issuer = issuer
+      owner = owner
+      tokenAmount = 0.0   -- initially setting the token amount as zero
+
+-- Initilaizing the totalLimit for 10,000 by the issuer
+  loanLimitCid1 <- submit issuer do 
+    createCmd LoanLimit with  
+      issuer = issuer
+      loanLimit = 0.0
+      loanRequested = 0.0
+      totalLimit = 100000.0    -- intializing the total loanlimit for the bank
+
+-- Requesting the loan , considering salary and loanlimit 
+  loanRequestCid1 <- submit borrower2 do    
+    createCmd LoanRequest with 
+      issuer = issuer
+      owner = borrower2
+      salary = 10000.00    -- salary of the borrower 0.25 * 100 , checks for the limit
+      loanAmount = 10000.0    --  if the loan requested is <= limit, we approve the loan
+      loanLimitCid = loanLimitCid1
+       
+  loanCid1 <- submit issuer do 
+    exerciseCmd loanRequestCid1 ApproveRequest   -- excersing this checks and updates the loan template
+
+-- Second request made by a different borrower
+  loanRequestCid2 <- submit owner do   
+    createCmd LoanRequest with 
+      issuer = issuer 
+      owner = owner
+      salary = 50000.0  -- checks the loanlimit 0.25 * 50,000 = 12500
+      loanAmount = 5000.0   -- 5000 is under the limit , so Approved
+      loanLimitCid = loanLimitCid1   
+
+  loanCid2 <- submit issuer do   
+    exerciseCmd loanRequestCid2 ApproveRequest   -- creates a loan template with updated approval status
+
+-- After loan approval ,loan amount is disbursed to the token wallet 
+  loanCid <- submit issuer do   
+    exerciseCmd loanCid2 Disburse with   -- checks for disbursed amount, ensures it doesnt exceed the loan limit
+     disAmount = 5000.0
+     tokenWalletCid = tokenCid    
+
+  return ()
