@@ -94,6 +94,7 @@ test_token = script do
       loanLimitCid = loanLimitCid8_2  
 
   loanCid4 <- submit issuer do 
-    exerciseCmd loanRequestCid4 ApproveRequest      
+    exerciseCmd loanRequestCid4 ApproveRequest   
+  -- the last request updated and the totalLimit in the LoanLimit contract  Updated 
 
   return ()
