@@ -1,0 +1,185 @@
+module LoanRepayment where 
+
+-- 1. TokenWallet Template    --- Based on Account Based Model
+template TokenWallet -- Created a Token Wallet account, so the funds will be Deposited and Transfered from here.
+  with 
+    owner : Party
+    issuer  : Party
+    tokenAmount  : Decimal -- This is the Token balance of the wallet
+  where
+    signatory issuer, owner  -- Both parties have access to the TokenWallet
+    key owner : Party  
+    maintainer key   -- used to fetch the owner party by fetch by key, not used in here, used for future use
+
+    choice Credit : ContractId  TokenWallet -- Add funds to the TokenWallet
+      with
+        amount : Decimal 
+      controller  issuer  -- only issuer has the authority to add balance to the owners account , owner shouldn't have access to this choice
+        do 
+        assertMsg "The amount should be positive" (amount > 0.0) -- Make sures the amount entered is Positive.
+        create this with 
+          tokenAmount = tokenAmount + amount -- Updates the Account Balance by adding the amount 
+
+    choice Debit : ContractId TokenWallet -- Deducts amount from the TokenWallet
+      with 
+        amount : Decimal 
+      controller  owner   -- only owner can send funds to a different account
+        do 
+        assertMsg "Insufficient balance" (amount <= tokenAmount) -- Make sures the requested amount is in the account.
+        assertMsg " Sent amount should be greater than zero" ( amount > 0.0) -- Make sure the amount is more than zero.
+        create this with 
+          tokenAmount = tokenAmount - amount -- Deducts the funds from thwe account and updates
+                 
+-- 2. Loan Limit Template 
+
+template LoanLimit -- Based on the Individuals Income
+  with 
+    issuer : Party
+    owner : Party
+    --salary : Decimal -- Asking Income
+    loanLimit : Decimal  -- Considered as Limit for a individual person
+    loanRequested : Decimal --  Considered as a Requested loan amount by a person
+    totalLimit : Decimal --  Total Predefined amount set by the Bank
+  where
+    signatory issuer  -- only bank can control the limits
+    observer owner -- In the future use, observer is owner because owner should fetch the details
+
+    choice CheckLimit : ContractId LoanLimit -- Updates the loanLimit and totalLimit
+      with
+        loanAmount : Decimal
+        salary : Decimal
+      controller issuer -- Bank is the Controller
+        do
+        assertMsg "The amount should be 25% of the Salary" (loanAmount <= 0.25 * salary) -- checking the requested loan is 25% of the salary
+        assertMsg "Loan Limit Exceded" (loanAmount <= totalLimit) -- checking the requested amount is under the total loan limit
+        create this with
+          loanLimit = 0.25 * salary --  Gives the Loanlimit amount for a individual
+          totalLimit = totalLimit - loanAmount -- Updates the totalLimit after each LoanApproval
+          loanRequested = loanAmount  -- Updated with the loan amount
+    
+    choice AddRepaidAmount: ContractId LoanLimit  -- Everytime the owner excercise the repay choice it also updates the total limit
+      with 
+        repay : Decimal
+      controller issuer   -- only issuer have the authority
+      do 
+      create this with 
+        totalLimit = totalLimit + repay    -- Updates total limit each time.
+
+-- 3. LoanRequest Template
+
+template LoanRequest -- Borrower requests the loan 
+  with 
+    loanLimitCid : ContractId LoanLimit   -- checking the Loan LoanLimit
+    issuer : Party 
+    owner : Party
+    salary : Decimal -- Takes salary as input
+    loanAmount : Decimal -- Takes input as loanAmount
+    
+  where
+    signatory owner  -- owner requests the loan so owner is signatory
+    observer issuer  -- issuer acts as observer
+    
+    choice ApproveRequest : ContractId Loan -- Choice to accept the Request
+      controller issuer   -- Only issuer can perform this action 
+      do
+      -- Validating the loan limit by taking input salary and loan amount calculating with loan limit template
+      let isValid = loanAmount <= 0.25 * salary 
+      if isValid then do
+      _ <- exercise loanLimitCid CheckLimit with 
+        salary = salary
+        loanAmount = loanAmount  
+      create Loan with   -- creates loan if loan request is under the loan limit
+        issuer 
+        owner 
+        loanAmount = loanAmount
+        disbursedAmount = 0.0
+        status = "Approved" -- If Approved status Changed to Approved
+        repaidAmount = 0.0
+      else 
+       create Loan with  -- if the loan request amount is over the loanlimit
+         issuer
+         owner 
+         loanAmount = loanAmount
+         disbursedAmount = 0.0
+         status = "Rejected"  -- Updates status as rejected
+         repaidAmount = 0.0
+
+
+
+-- 4.Loan Template
+
+template Loan  -- This is a Loan Template created after the Request Approved or Rejected
+  with
+    issuer : Party
+    owner : Party
+    loanAmount : Decimal   -- Approved loan amount
+    disbursedAmount: Decimal
+    status : Text
+    repaidAmount : Decimal  -- repaid amount updates here
+  where
+    signatory issuer, owner  -- agreement between issuer and owner
+
+    choice Disburse : ContractId Loan  -- disbursing the approved amount into toekn wallet
+      with
+        disAmount : Decimal 
+        tokenWalletCid : ContractId TokenWallet  -- tokenwallet contract address
+      controller issuer
+      do
+        assertMsg "Disbursement Amount must be positive" (disAmount > 0.0)   -- checking if the disburse amount is greater than zero
+        assertMsg "Disbuesement exceds remaining limit" (disbursedAmount + disAmount <= loanAmount)  -- ensuring disbursed amount doesnt exceed the loan amount
+        _ <- exercise tokenWalletCid Credit with amount = disAmount   -- exercisng the credit choice in tokenwallet
+        create this with 
+         disbursedAmount = disbursedAmount + disAmount -- updating the disburse amount in loan contract
+
+    choice Repay : (Optional(ContractId Loan), ContractId TokenWallet, ContractId LoanLimit)  -- repay choice, Have used optional , as if the totaldisbursment is equals the repaid amount it should archive or update the loan contract.
+      with 
+        repay : Decimal  -- input 
+        tokenWalletCid : ContractId TokenWallet  -- updates after each choice is exercised
+        repaymentRestrictionCid : ContractId LoanRepaymentRestriction   -- used to fetch the loan repayment restriction
+        loanLimitCid : ContractId LoanLimit  
+
+      controller owner -- owner executes the choice
+      do 
+        repayRestriction <- fetch repaymentRestrictionCid   -- to fetch minimum pay from the loanRepaymentRestriction template
+        assertMsg "Repayment amount should be greater than or equal to minimumAmount" (repay >= repayRestriction.minimumPay )  -- checking repay amount is grater than minimum pay
+        assertMsg "Repayment amount should not exceed the disbursedAmount" (repaidAmount + repay <= disbursedAmount)  -- repayment should not exceed the disbursed amount
+        newWalletCid <- exercise tokenWalletCid Debit with amount = repay  -- deducts funds from the token wallet
+        newLimitCid <- exercise loanLimitCid AddRepaidAmount  with repay = repay -- Adding the repayed amount to the total limit in loanlimit contract
+  
+      -- Very Important to archive the contract , if repaid amount equals disbursed amount archive contract, else create a new contract
+        let newRepaid = repaidAmount + repay
+        if newRepaid == disbursedAmount then
+          return (None, newWalletCid, newLimitCid)
+        else do
+         --  new Loan contract is created with updated amount 
+          newLoanCid <- create this with
+            repaidAmount = newRepaid
+          return (Some newLoanCid, newWalletCid, newLimitCid)   -- Some newloanCid is a value of type contractid , that states a partial repayment occured .
+   
+-- loan RepaymentRestriction template
+template LoanRepaymentRestriction   
+  with
+    issuer : Party
+    owner : Party    -- 
+    minimumPay :Decimal   -- Saving minimum pay 
+    loanCid :  ContractId Loan    
+  where
+    signatory issuer
+    observer owner   -- owner is used , because owner should fetch the minimum loan repayment from here , to use it in the loanrepay
+
+    nonconsuming choice MinimumPayment : ContractId LoanRepaymentRestriction   -- Non consuming choice , The minimum payment will not change untill the full loan repayment
+      controller issuer    -- controlled by the issuer 
+      do 
+        loan <- fetch loanCid  -- To check the disbursed amount, fetching the loan contract
+        create this with 
+          minimumPay =  0.05 * loan.disbursedAmount   -- checking directly through the disburse amount as this will not change dynamically, this is the minimum amount which is 5 percent of the disbursed amount.
+
+
+
+
+        
+    
+
+
+
+
