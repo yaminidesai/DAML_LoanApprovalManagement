@@ -10,6 +10,8 @@ test_token = script do
   issuer <- allocateParty "Bank" 
   owner <- allocateParty "akhil"
   borrower2 <- allocateParty "Yami"
+  borrower3 <- allocateParty "Bheema"
+  borrower4 <- allocateParty "shashi"
 
  -- Initializing the Token Wallet with issuer and owner
   tokenCid <- submitMulti [issuer, owner] [] do   -- as issuer and owner are signatories
@@ -54,6 +56,44 @@ test_token = script do
   loanCid <- submit issuer do   
     exerciseCmd loanCid2 Disburse with   -- checks for disbursed amount, ensures it doesnt exceed the loan limit
      disAmount = 5000.0
-     tokenWalletCid = tokenCid    
+     tokenWalletCid = tokenCid   
+
+
+  loanLimits <- query @LoanLimit issuer
+
+  -- Fetch all active LoanLimit contracts
+  loanLimits : [(ContractId LoanLimit, LoanLimit)] <- query @LoanLimit issuer
+  let [(loanLimitCid5_2, _)] = [ (cid, ll) | (cid, ll) <- loanLimits, ll.totalLimit == 95000.0 ]
+-- Find the specific one you want
+-- choose the one with totalLimit = 95000.0 (which came from #5:2)
+  
+-- This is the third loan request 
+  loanRequestCid3 <- submit borrower3 do 
+    createCmd LoanRequest with 
+      issuer = issuer 
+      owner = borrower3
+      salary = 150000.0   -- salary of the person, (0.25 * salary = 37500)
+      loanAmount = 2000.0   -- 2000 is under the limit, so we approve it
+      loanLimitCid = loanLimitCid5_2
+
+  loanCid3 <- submit issuer do 
+    exerciseCmd loanRequestCid3 ApproveRequest   -- exercising the choice, loan approved and updated in the loan limit and loan contract
+ 
+
+  -- Fetch all active LoanLimit contracts
+  loanLimits : [(ContractId LoanLimit, LoanLimit)] <- query @LoanLimit issuer
+  let [(loanLimitCid8_2, _)] = [ (cid, ll) | (cid, ll) <- loanLimits, ll.totalLimit == 93000.0 ]
+
+-- This is the fourth request
+  loanRequestCid4 <- submit borrower4 do 
+    createCmd LoanRequest with 
+      issuer = issuer 
+      owner = borrower4
+      salary = 450000.0  
+      loanAmount = 93000.0  -- Beyond this limit , if any other loan request happens, it autmotically rejects, as there are no funds left for the bank to lend.(loanlimit = 0) 
+      loanLimitCid = loanLimitCid8_2  
+
+  loanCid4 <- submit issuer do 
+    exerciseCmd loanRequestCid4 ApproveRequest      
 
   return ()
