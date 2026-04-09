@@ -2,6 +2,8 @@
 
 A personal project modeling a bank loan lifecycle on Canton Network using DAML smart contracts. Built across three incremental modules — LoanApproval, TokenDisbursement, and LoanRepayment — where each module extends the previous one without breaking it.
 
+The three modules were built intentionally in sequence to demonstrate how DAML applications can grow incrementally. Module 1 establishes the core approval workflow — just enough to request a loan and get a decision. Module 2 adds the token wallet and disbursement layer on top of that foundation. Module 3 adds the full repayment loop including minimum payment enforcement and automatic contract archival on payoff. Each module is self-contained and the previous ones keep working as-is. Nothing in Module 1 needed to change when Module 3 was built.
+
 The core idea is simple: loan eligibility, disbursement limits, and repayment thresholds are enforced by the contract itself, not by application code. If the business rule lives in the contract, no developer can bypass it by changing a config file or skipping a middleware check. The contract is the policy.
 
 ---
