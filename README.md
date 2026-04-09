@@ -1,6 +1,6 @@
 # DAML Loan Approval Management
 
-A personal project modeling a bank loan lifecycle on Canton Network using DAML smart contracts. Built across three incremental modules — LoanApproval, TokenDisbursement, and LoanRepayment — where each module extends the previous one without breaking it.
+Modeling a bank loan lifecycle on Canton Network using DAML smart contracts. Built across three incremental modules — LoanApproval, TokenDisbursement, and LoanRepayment — where each module extends the previous one without breaking it.
 
 Each module was built incrementally — Module 1 approval, Module 2 disbursement, Module 3 repayment — to show how DAML contracts can be extended without touching what already works.
 
