@@ -1,5 +1,42 @@
 module TokenDisbursement where 
--- 1. TokenWallet Template 
+-- 1. TokenWallet Template
+--
+-- FINANCIAL CONTEXT:
+--   Represents an account-based token wallet that holds a borrower's
+--   disbursed loan balance. Models the bank account into which approved
+--   loan funds are deposited. The issuer credits funds on disbursement;
+--   the owner debits funds when spending or repaying. The separation of
+--   credit (issuer-controlled) and debit (owner-controlled) mirrors the
+--   real-world model where a bank deposits funds into a customer account
+--   and the customer controls outgoing transactions.
+--
+-- SIGNATORIES: issuer, owner
+--   Both parties co-sign the wallet because it represents a custodial
+--   relationship — the issuer holds and manages the funds, the owner
+--   has the right to the balance. Dual signatories prevent either party
+--   from unilaterally creating or closing the account. The issuer cannot
+--   open a wallet on behalf of a borrower without their authorization,
+--   and the owner cannot self-issue a funded wallet.
+--
+-- OBSERVERS: none
+--   No third-party observers. The wallet balance is private to the
+--   account holder and the issuing institution. This reflects standard
+--   bank account confidentiality — account balances are not visible to
+--   other parties absent a legal order.
+--
+-- COMPLIANCE:
+--   GDPR Article 5(1)(c) — data minimization. The wallet is visible only
+--   to issuer and owner; no other party can observe the borrower's balance.
+--   CFPB Regulation Z — the issuer-controlled Credit choice ensures funds
+--   can only be added by the lending institution as part of an approved
+--   disbursement, not self-credited by the borrower.
+--
+-- MIGRATION NOTE:
+--   This template uses a pattern that would benefit from contract keys in
+--   DAML 2.x. In DAML 3.x LF 2.1, contract keys are not supported. The
+--   current implementation relies on off-ledger tracking of contract IDs.
+--   A future refactor should evaluate the Participant Query Store as the
+--   recommended replacement pattern.
 template TokenWallet -- Created a Token Wallet account, so the funds will be Deposited and Transfered from here.
   with 
     owner : Party
@@ -27,8 +64,39 @@ template TokenWallet -- Created a Token Wallet account, so the funds will be Dep
         create this with 
           tokenAmount = tokenAmount - amount -- Deducts the funds from thwe account and updates
                  
--- 2. Loan Limit Template 
-
+-- 2. Loan Limit Template
+--
+-- FINANCIAL CONTEXT:
+--   Represents the bank's credit concentration control — a bank-wide
+--   lending capacity that decrements with each approved loan and tracks
+--   how much the institution can still lend across all active borrowers.
+--   This is distinct from the per-borrower limit governed by 12 USC 84
+--   (OCC legal lending limit, capped at 15% of unimpaired capital per
+--   single borrower). The totalLimit here models an aggregate portfolio
+--   constraint: the bank has a total pool of lendable funds, and each
+--   approval draws from that pool until it is exhausted.
+--
+-- SIGNATORIES: issuer
+--   The bank is the sole signatory because lending capacity is an
+--   institutional asset that the bank alone controls. Borrowers have no
+--   legal claim over the bank's internal capital allocation decisions.
+--   The bank sets, updates, and enforces its own concentration limits
+--   as a matter of internal credit policy.
+--
+-- OBSERVERS: none
+--   No observers. The bank's total lending capacity and internal limits
+--   are proprietary credit risk data. Exposing this to borrowers would
+--   reveal how much aggregate lending headroom the bank has — competitively
+--   sensitive information that borrowers have no right to see.
+--
+-- COMPLIANCE:
+--   FDIC Interagency Guidelines for Credit Concentration Risk — the
+--   totalLimit field implements a portfolio-level concentration control,
+--   consistent with supervisory guidance that banks maintain internal
+--   limits on credit concentrations relative to capital.
+--   12 USC 84 (OCC Legal Lending Limit) — acknowledged as the statutory
+--   per-borrower cap; the totalLimit here models the bank's internal
+--   aggregate capacity, a complementary but distinct control.
 template LoanLimit -- Based on the Individuals Income
   with 
     issuer : Party
@@ -53,8 +121,39 @@ template LoanLimit -- Based on the Individuals Income
           loanRequested = loanAmount  -- Updated with the loan amount
 
 -- 3. LoanRequest Template
-
-template LoanRequest -- Borrower requests the loan 
+--
+-- FINANCIAL CONTEXT:
+--   Extends the basic loan application from Module 1 with income-based
+--   eligibility verification and integration with the bank's lending
+--   capacity limit. The borrower provides their salary alongside the
+--   requested amount; the ApproveRequest choice validates that the
+--   loan does not exceed 25% of salary and exercises the LoanLimit's
+--   CheckLimit choice to atomically deduct from the bank's total pool.
+--   This implements the CFPB Ability-to-Repay principle at the contract
+--   level — the eligibility check cannot be skipped or overridden by
+--   application code.
+--
+-- SIGNATORIES: owner (borrower)
+--   The borrower signs the request, committing their stated income and
+--   requested amount to the ledger. This creates an on-ledger record
+--   of the borrower's representations at time of application, which
+--   supports the bank's documentation obligation under BSA CIP rules.
+--
+-- OBSERVERS: issuer (bank)
+--   The bank observes the request to evaluate and exercise the approval
+--   choice. It does not co-sign the request because it has not yet made
+--   a credit decision — observation without signature reflects the bank's
+--   review role at this stage.
+--
+-- COMPLIANCE:
+--   CFPB Ability-to-Repay (Regulation Z) — the 25% debt-to-income check
+--   inside ApproveRequest enforces income-based lending eligibility as a
+--   contract assertion. If the borrower's stated salary does not support
+--   the requested amount, the choice fails at the interpreter level.
+--   BSA Section 1020.220 (Customer Identification Program) — the owner
+--   party represents the identified loan applicant; in a production
+--   system this would be linked to a verified identity record.
+template LoanRequest -- Borrower requests the loan
   with 
     loanLimitCid : ContractId LoanLimit   -- checking the Loan LoanLimit
     issuer : Party 
@@ -89,8 +188,38 @@ template LoanRequest -- Borrower requests the loan
          disbursedAmount = 0.0
          status = "Rejected"  -- Updates status as rejected
 
--- 4.Loan Template
-
+-- 4. Loan Template
+--
+-- FINANCIAL CONTEXT:
+--   Extends the Module 1 Loan contract with disbursement tracking.
+--   Adds disbursedAmount to record how much of the approved loan has
+--   been released into the borrower's wallet. The Disburse choice allows
+--   the bank to release funds incrementally — each tranche is validated
+--   against the approved loanAmount before the Credit choice on the
+--   TokenWallet is exercised. This models the real-world practice of
+--   staged loan disbursement, common in construction loans, revolving
+--   credit facilities, and milestone-based lending.
+--
+-- SIGNATORIES: issuer, owner
+--   Both parties co-sign the loan agreement. The issuer's signature
+--   represents the bank's credit decision and commitment to disburse
+--   up to the approved amount. The owner's signature represents the
+--   borrower's acceptance of the loan terms. Neither can unilaterally
+--   modify the loan record after creation.
+--
+-- OBSERVERS: none
+--   No third-party observers. Loan terms and disbursement status are
+--   private to the contracting parties. The borrower's outstanding
+--   balance is not visible to other borrowers or external parties.
+--
+-- COMPLIANCE:
+--   CFPB Regulation Z — the Disburse choice assertion
+--   (disbursedAmount + disAmount <= loanAmount) enforces that total
+--   disbursement never exceeds the approved credit limit. This is a
+--   contract-level control that cannot be bypassed by repeated calls.
+--   FDIC Credit Concentration Guidelines — the disbursedAmount field
+--   provides on-ledger visibility into actual funds released, supporting
+--   the bank's internal exposure tracking against the LoanLimit contract.
 template Loan  -- This is a Loan Template created after the Request Approved or Rejected
   with
     issuer : Party

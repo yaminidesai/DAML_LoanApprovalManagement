@@ -1,6 +1,39 @@
 module LoanRepayment where 
 
--- 1. TokenWallet Template    --- Based on Account Based Model
+-- 1. TokenWallet Template  — Account-Based Model
+--
+-- FINANCIAL CONTEXT:
+--   Same custodial account model as Module 2. Holds the borrower's
+--   token balance and is the source of funds for loan repayments.
+--   When the borrower exercises Repay on the Loan contract, it internally
+--   exercises the Debit choice here to pull the repayment amount from
+--   the wallet. The wallet balance must cover each repayment — insufficient
+--   balance fails the Debit assertion before any state changes are committed.
+--
+-- SIGNATORIES: issuer, owner
+--   Dual signatories for the same reason as Module 2: the wallet
+--   represents a custodial relationship between the bank (issuer) and
+--   the borrower (owner). Neither can open or close the account without
+--   the other's co-authorization.
+--
+-- OBSERVERS: none
+--   The borrower's wallet balance is private to the two contracting
+--   parties. No other borrower or third party can observe the balance.
+--
+-- COMPLIANCE:
+--   GDPR Article 5(1)(c) — data minimization. Wallet balance data is
+--   scoped to the minimum necessary parties: the issuing institution
+--   and the account holder.
+--
+-- MIGRATION NOTE:
+--   This template uses a contract key (keyed by owner) for potential
+--   fetchByKey lookup. Contract keys are not supported in DAML 3.x
+--   LF 2.1. The key is not actively used in the current repayment
+--   scripts — wallet ContractIds are tracked off-ledger and passed
+--   explicitly to each choice. A future refactor targeting DAML 3.x
+--   should remove the key and maintainer fields and evaluate the
+--   Participant Query Store as the recommended replacement pattern
+--   for wallet lookups by owner.
 template TokenWallet -- Created a Token Wallet account, so the funds will be Deposited and Transfered from here.
   with 
     owner : Party
@@ -30,8 +63,39 @@ template TokenWallet -- Created a Token Wallet account, so the funds will be Dep
         create this with 
           tokenAmount = tokenAmount - amount -- Deducts the funds from thwe account and updates
                  
--- 2. Loan Limit Template 
-
+-- 2. Loan Limit Template
+--
+-- FINANCIAL CONTEXT:
+--   Extends the Module 2 LoanLimit with repayment recovery logic.
+--   Adds an owner observer field and the AddRepaidAmount choice, which
+--   increments totalLimit each time a borrower makes a repayment.
+--   This closes the lending lifecycle: when a loan is fully repaid,
+--   the bank's total lending capacity is restored to the level it was
+--   at before that loan was approved. The result is a self-balancing
+--   credit pool — the bank's available lending headroom on the ledger
+--   always reflects the net of approvals minus repayments.
+--
+-- SIGNATORIES: issuer
+--   The bank controls lending capacity as an internal institutional
+--   resource. Only the bank can set the total limit, approve loans
+--   that draw from it, and restore it upon repayment.
+--
+-- OBSERVERS: owner
+--   The borrower is added as an observer in this module (not present
+--   in Module 2) so they can fetch the LoanLimit ContractId as needed
+--   for the repayment workflow. In DAML, a party must be a stakeholder
+--   to reference a contract in a transaction. The observer relationship
+--   gives the borrower just enough visibility to participate in
+--   repayment without granting any control over the limit itself.
+--
+-- COMPLIANCE:
+--   FDIC Interagency Guidelines for Credit Concentration Risk — the
+--   AddRepaidAmount choice models the restoration of lending capacity
+--   as loans are repaid, maintaining accurate on-ledger representation
+--   of the bank's net credit exposure at all times.
+--   12 USC 84 (OCC Legal Lending Limit) — the totalLimit here
+--   complements the per-borrower statutory cap by tracking aggregate
+--   institutional exposure rather than individual borrower concentration.
 template LoanLimit -- Based on the Individuals Income
   with 
     issuer : Party
@@ -66,8 +130,39 @@ template LoanLimit -- Based on the Individuals Income
         totalLimit = totalLimit + repay    -- Updates total limit each time.
 
 -- 3. LoanRequest Template
-
-template LoanRequest -- Borrower requests the loan 
+--
+-- FINANCIAL CONTEXT:
+--   Same income-based eligibility check as Module 2, extended to
+--   initialize the repaidAmount field on the resulting Loan contract.
+--   The ApproveRequest choice validates the 25% debt-to-income ratio,
+--   exercises CheckLimit on the LoanLimit contract to atomically reduce
+--   the bank's lending pool, and creates a Loan with repaidAmount = 0.0
+--   ready for the repayment lifecycle. Rejected loans are also created
+--   with repaidAmount initialized, maintaining a consistent contract
+--   shape across both outcomes.
+--
+-- SIGNATORIES: owner (borrower)
+--   The borrower signs the application, committing their stated income
+--   and requested amount as an on-ledger record. This supports the
+--   lender's documentation obligation under the CFPB Ability-to-Repay
+--   rule — the borrower's income representation is captured at
+--   application time and cannot be retroactively altered.
+--
+-- OBSERVERS: issuer (bank)
+--   The bank observes the request in order to exercise the approval
+--   choice. It does not sign at this stage — observation reflects
+--   the bank's review role before committing to a credit decision.
+--
+-- COMPLIANCE:
+--   CFPB Ability-to-Repay (Regulation Z) — the 25% salary cap
+--   assertion inside ApproveRequest enforces income-based eligibility
+--   at the ledger interpreter level. A request that fails the ratio
+--   check produces a Rejected loan rather than throwing an error,
+--   creating an auditable record of both outcomes.
+--   BSA Section 1020.220 — the owner party represents the identified
+--   loan applicant whose identity must be verified before credit is
+--   extended under Customer Identification Program requirements.
+template LoanRequest -- Borrower requests the loan
   with 
     loanLimitCid : ContractId LoanLimit   -- checking the Loan LoanLimit
     issuer : Party 
@@ -106,8 +201,40 @@ template LoanRequest -- Borrower requests the loan
 
 
 
--- 4.Loan Template
-
+-- 4. Loan Template
+--
+-- FINANCIAL CONTEXT:
+--   The fully featured loan contract covering approval, disbursement,
+--   and repayment in a single template. Adds repaidAmount to track
+--   cumulative repayments against disbursedAmount. The Repay choice
+--   is the heart of this module: it validates the repayment amount
+--   against the minimum threshold (fetched from LoanRepaymentRestriction),
+--   debits the borrower's wallet, updates the bank's lending capacity,
+--   and either creates a new loan contract with updated repaidAmount
+--   (partial repayment) or archives the contract entirely (full repayment).
+--   The Optional (ContractId Loan) return type forces the caller to
+--   handle both outcomes explicitly — there is no way to accidentally
+--   hold a stale ContractId after full repayment.
+--
+-- SIGNATORIES: issuer, owner
+--   Both parties co-sign for the same reasons as Module 2: the loan
+--   is a bilateral credit agreement. The borrower's co-signature means
+--   the Repay choice can only be exercised by the borrower — the bank
+--   cannot force repayment, and the borrower cannot repay more than
+--   was disbursed.
+--
+-- OBSERVERS: none
+--   No third-party observers. Loan balance, repayment history, and
+--   disbursement status are private to the contracting parties.
+--
+-- COMPLIANCE:
+--   CFPB Regulation Z — Disburse asserts (disbursedAmount + disAmount
+--   <= loanAmount), preventing over-disbursement at the contract level.
+--   FDIC Credit Concentration Guidelines — repaidAmount + Repay's
+--   AddRepaidAmount call maintain accurate net exposure on the LoanLimit
+--   contract in real time across the full repayment lifecycle.
+--   GDPR Article 5(1)(c) — no observers beyond the two contracting
+--   parties; repayment history is not broadcast to third parties.
 template Loan  -- This is a Loan Template created after the Request Approved or Rejected
   with
     issuer : Party
@@ -156,8 +283,46 @@ template Loan  -- This is a Loan Template created after the Request Approved or 
             repaidAmount = newRepaid
           return (Some newLoanCid, newWalletCid, newLimitCid)   -- Some newloanCid is a value of type contractid , that states a partial repayment occured .
    
--- loan RepaymentRestriction template
-template LoanRepaymentRestriction   
+-- 5. LoanRepaymentRestriction Template
+--
+-- FINANCIAL CONTEXT:
+--   Represents the bank's minimum repayment policy as a standalone
+--   contract fetched at runtime by the Loan.Repay choice. The minimum
+--   payment is set to 5% of the disbursed amount, calculated when the
+--   bank exercises MinimumPayment after disbursement. Storing this
+--   policy in a separate contract rather than hardcoding it into the
+--   Loan template has a specific operational advantage: the bank can
+--   update the restriction contract to reflect a new policy — say,
+--   changing the threshold from 5% to 3% during a borrower hardship
+--   program — without redeploying the Loan contract. The Repay choice
+--   always fetches the current restriction at execution time, so policy
+--   changes take effect on the next repayment without any contract
+--   migration. This is a meaningful design choice for financial
+--   institutions that need to adjust repayment policies in response
+--   to regulatory guidance, economic conditions, or customer circumstances.
+--
+-- SIGNATORIES: issuer
+--   The bank is the sole signatory because minimum repayment thresholds
+--   are a unilateral bank policy, not a bilateral agreement. The borrower
+--   does not negotiate the minimum — it is set by the institution and
+--   enforced against them. Bank-only signatory reflects this correctly.
+--
+-- OBSERVERS: owner
+--   The borrower is an observer so they can see the minimum repayment
+--   requirement that applies to their loan. Transparency about the
+--   minimum payment threshold is a basic consumer protection expectation
+--   and consistent with CFPB disclosure principles — borrowers should
+--   know what the minimum acceptable payment is before attempting to repay.
+--
+-- COMPLIANCE:
+--   CFPB Ability-to-Repay (Regulation Z) — minimum repayment enforcement
+--   prevents micro-payments that do not meaningfully reduce the outstanding
+--   balance, protecting the integrity of the repayment schedule and the
+--   bank's ability to recover the disbursed funds within a reasonable term.
+--   The runtime fetch design supports regulatory flexibility: if supervisory
+--   guidance requires a change to minimum payment calculations, the bank
+--   can update the restriction without a ledger upgrade.
+template LoanRepaymentRestriction
   with
     issuer : Party
     owner : Party    -- 

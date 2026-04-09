@@ -1,11 +1,40 @@
 module LoanApproval where 
 
+-- FINANCIAL CONTEXT:
+--   Represents the initial loan application submitted by a borrower to a bank.
+--   In practice this is the point at which the lender's underwriting obligation
+--   begins — the bank must assess the borrower's repayment capacity before
+--   making a credit decision. The template captures the minimum information
+--   needed to make that determination: who is asking, how much, and from whom.
+--
+-- SIGNATORIES: borrower
+--   The borrower signs because they are the party initiating the credit
+--   relationship and asserting that the loan amount is valid. Making the
+--   borrower the signatory creates an on-ledger record of the application
+--   that the borrower cannot later deny submitting. The bank is an observer
+--   at this stage — it has not yet committed to anything.
+--
+-- OBSERVERS: bank
+--   The bank is an observer so it can see the request and exercise the
+--   ApproveRequest or RejectRequest choices. It does not co-sign at this
+--   stage because the application is a unilateral act of the borrower.
+--
+-- COMPLIANCE:
+--   CFPB Ability-to-Repay rule (Regulation Z) — the loanAmount field
+--   combined with the ApproveRequest logic (carried into TokenDisbursement
+--   and LoanRepayment modules) enforces income-based eligibility. The
+--   application is the starting point of that verification chain.
+--   BSA Section 1020.220 (Customer Identification Program) — the borrower
+--   party allocation serves as the on-ledger identity record for the loan
+--   applicant. In a production system this would reference a verified KYC
+--   record; here it establishes the party relationship that gates all
+--   subsequent choices.
 template LoanRequest
   with
     bank : Party -- Who Approves/Rejects Loan
     borrower : Party -- who Requests the Loan
     loanAmount: Decimal -- Loan Amount
-  where 
+  where
     ensure loanAmount > 0.0   -- LoanRequest Amount should be always greater than Zero.
     signatory borrower -- Borrower is only Authorized here because he is the one requesting the Loan
     observer  bank -- Bank have rights to Observe
@@ -28,11 +57,42 @@ template LoanRequest
         loanAmount
         status = "Rejected" -- If Rejected status updates to Rejected
 
+-- FINANCIAL CONTEXT:
+--   Represents the binding loan agreement between the bank and borrower,
+--   created immediately upon the bank's approval or rejection decision.
+--   The status field records the outcome. An Approved loan is the legal
+--   instrument that authorizes disbursement; a Rejected loan is an
+--   immutable record of the declined application. Both outcomes produce
+--   a co-signed contract, creating an auditable record of the credit
+--   decision that neither party can unilaterally alter or delete.
+--
+-- SIGNATORIES: bank, borrower
+--   Both parties sign the Loan contract because it represents a bilateral
+--   agreement — the bank's credit decision and the borrower's acceptance
+--   of the terms. Dual signatories mean neither party can archive or
+--   modify the loan record without the other's co-authorization, which
+--   satisfies the audit trail requirement that financial institutions
+--   must maintain records of credit decisions.
+--
+-- OBSERVERS: none
+--   No third-party observers. The loan agreement is a private bilateral
+--   contract between the bank and borrower. Regulators access loan records
+--   through examination rather than real-time ledger observation.
+--   This limits data exposure to the parties directly bound by the agreement.
+--
+-- COMPLIANCE:
+--   GDPR Article 5(1)(c) — data minimization. Only the two contracting
+--   parties are stakeholders; no third party receives the borrower's
+--   loan amount or financial status as a side effect of contract creation.
+--   CFPB Ability-to-Repay (Regulation Z) — the Approved status signals
+--   that the bank has made a documented, on-ledger credit determination.
+--   The immutable co-signed record satisfies recordkeeping obligations
+--   for credit decisions under federal lending regulations.
 template Loan  -- This is a Loan Template created after the Request Approved or Rejected
   with
     bank : Party
     borrower : Party
-    loanAmount : Decimal 
+    loanAmount : Decimal
     status : Text
   where
     signatory bank, borrower  
