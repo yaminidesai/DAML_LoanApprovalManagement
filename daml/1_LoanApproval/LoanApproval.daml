@@ -1,18 +1,26 @@
-module LoanApproval where 
+module LoanApproval where
+
+-- LoanStatus
+--   Typed status replaces the previous status : Text field. Using an ADT
+--   means a typo like "Approvd" no longer compiles, and pattern matching
+--   on status is exhaustive-checked by the compiler.
+data LoanStatus = Approved | Rejected
+  deriving (Eq, Show)
 
 -- FINANCIAL CONTEXT:
 --   Represents the initial loan application submitted by a borrower to a bank.
 --   In practice this is the point at which the lender's underwriting obligation
 --   begins — the bank must assess the borrower's repayment capacity before
 --   making a credit decision. The template captures the minimum information
---   needed to make that determination: who is asking, how much, and from whom.
+--   needed to make that determination: who is asking, how much, from whom,
+--   and the borrower's stated income.
 --
 -- SIGNATORIES: borrower
 --   The borrower signs because they are the party initiating the credit
---   relationship and asserting that the loan amount is valid. Making the
---   borrower the signatory creates an on-ledger record of the application
---   that the borrower cannot later deny submitting. The bank is an observer
---   at this stage — it has not yet committed to anything.
+--   relationship and asserting that the loan amount and income are valid.
+--   Making the borrower the signatory creates an on-ledger record of the
+--   application that the borrower cannot later deny submitting. The bank
+--   is an observer at this stage — it has not yet committed to anything.
 --
 -- OBSERVERS: bank
 --   The bank is an observer so it can see the request and exercise the
@@ -20,10 +28,10 @@ module LoanApproval where
 --   stage because the application is a unilateral act of the borrower.
 --
 -- COMPLIANCE:
---   CFPB Ability-to-Repay rule (Regulation Z) — the loanAmount field
---   combined with the ApproveRequest logic (carried into TokenDisbursement
---   and LoanRepayment modules) enforces income-based eligibility. The
---   application is the starting point of that verification chain.
+--   CFPB Ability-to-Repay rule (Regulation Z) — the 25% debt-to-income
+--   assertion inside ApproveRequest enforces income-based eligibility
+--   at the ledger interpreter level. A request whose loanAmount exceeds
+--   25% of stated salary cannot produce an Approved loan.
 --   BSA Section 1020.220 (Customer Identification Program) — the borrower
 --   party allocation serves as the on-ledger identity record for the loan
 --   applicant. In a production system this would reference a verified KYC
@@ -31,31 +39,34 @@ module LoanApproval where
 --   subsequent choices.
 template LoanRequest
   with
-    bank : Party -- Who Approves/Rejects Loan
-    borrower : Party -- who Requests the Loan
-    loanAmount: Decimal -- Loan Amount
+    bank : Party
+    borrower : Party
+    salary : Decimal
+    loanAmount : Decimal
   where
-    ensure loanAmount > 0.0   -- LoanRequest Amount should be always greater than Zero.
-    signatory borrower -- Borrower is only Authorized here because he is the one requesting the Loan
-    observer  bank -- Bank have rights to Observe
+    ensure loanAmount > 0.0 && salary > 0.0
+    signatory borrower
+    observer  bank
 
-    choice ApproveRequest : ContractId Loan -- Choice to accept the Request
-      controller bank   -- Only Bank can perform this action 
+    choice ApproveRequest : ContractId Loan
+      controller bank
       do
-      create Loan with  
-        bank 
-        borrower  
-        loanAmount 
-        status = "Approved" -- If Approved status Changed to Approved
+        assertMsg "Loan exceeds 25% of stated salary (CFPB Ability-to-Repay)"
+          (loanAmount <= 0.25 * salary)
+        create Loan with
+          bank
+          borrower
+          loanAmount
+          status = Approved
 
-    choice RejectRequest : ContractId Loan   -- Choice to reject the Request
-      controller bank   -- Only Bank can perform this action 
-      do 
-      create Loan with 
-        bank 
-        borrower 
-        loanAmount
-        status = "Rejected" -- If Rejected status updates to Rejected
+    choice RejectRequest : ContractId Loan
+      controller bank
+      do
+        create Loan with
+          bank
+          borrower
+          loanAmount
+          status = Rejected
 
 -- FINANCIAL CONTEXT:
 --   Represents the binding loan agreement between the bank and borrower,
@@ -78,23 +89,19 @@ template LoanRequest
 --   No third-party observers. The loan agreement is a private bilateral
 --   contract between the bank and borrower. Regulators access loan records
 --   through examination rather than real-time ledger observation.
---   This limits data exposure to the parties directly bound by the agreement.
 --
 -- COMPLIANCE:
 --   GDPR Article 5(1)(c) — data minimization. Only the two contracting
 --   parties are stakeholders; no third party receives the borrower's
 --   loan amount or financial status as a side effect of contract creation.
 --   CFPB Ability-to-Repay (Regulation Z) — the Approved status signals
---   that the bank has made a documented, on-ledger credit determination.
---   The immutable co-signed record satisfies recordkeeping obligations
---   for credit decisions under federal lending regulations.
-template Loan  -- This is a Loan Template created after the Request Approved or Rejected
+--   that the bank has made a documented, on-ledger credit determination
+--   backed by the income-based eligibility assertion above.
+template Loan
   with
     bank : Party
     borrower : Party
     loanAmount : Decimal
-    status : Text
+    status : LoanStatus
   where
-    signatory bank, borrower  
-
-    
+    signatory bank, borrower

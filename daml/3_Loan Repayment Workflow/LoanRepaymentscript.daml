@@ -3,150 +3,145 @@ module LoanRepaymentscript where
 import LoanRepayment
 import Daml.Script
 
-test_Repayment : Script()
+test_Repayment : Script ()
 test_Repayment = script do
 
--- Allocating the parties Issuer,Owner and Bank
-  issuer <- allocateParty "Bank" 
+-- Party allocation
+  issuer <- allocateParty "Bank"
   owner <- allocateParty "Akhil"
   borrower2 <- allocateParty "Yami"
   borrower3 <- allocateParty "Bheema"
   borrower4 <- allocateParty "shashi"
 
- -- Initializing the Token Wallet with issuer and owner
-  tokenCid <- submitMulti [issuer, owner] [] do   -- as issuer and owner are signatories
-    createCmd TokenWallet with 
+-- Token wallet for the owner
+  tokenCid <- submitMulti [issuer, owner] [] do
+    createCmd TokenWallet with
       issuer = issuer
       owner = owner
-      tokenAmount = 0.0   -- initially setting the token amount as zero
+      tokenAmount = 0.0
 
--- Initilaizing the totalLimit for 10,000 by the issuer
-  loanLimitCid1 <- submit issuer do 
-    createCmd LoanLimit with  
+-- Bank sets initial lending pool of 100,000
+  loanLimitCid1 <- submit issuer do
+    createCmd LoanLimit with
       issuer = issuer
       owner = owner
       loanLimit = 0.0
       loanRequested = 0.0
-      totalLimit = 100000.0    -- intializing the total loanlimit for the bank
+      totalLimit = 100000.0
 
--- Requesting the loan , considering salary and loanlimit 
-  loanRequestCid1 <- submit borrower2 do    
-    createCmd LoanRequest with 
+-- borrower2 (Yami): $10k loan with $10k salary → 100% DTI, must fail
+  loanRequestCid1 <- submit borrower2 do
+    createCmd LoanRequest with
       issuer = issuer
       owner = borrower2
-      salary = 10000.00    -- salary of the borrower 0.25 * 100 , checks for the limit
-      loanAmount = 10000.0    --  if the loan requested is <= limit, we approve the loan
+      salary = 10000.0
+      loanAmount = 10000.0
       loanLimitCid = loanLimitCid1
-       
-  loanCid1 <- submit issuer do 
-    exerciseCmd loanRequestCid1 ApproveRequest   -- excersing this checks and updates the loan template
 
--- Second request made by a different borrower
-  loanRequestCid2 <- submit owner do   
-    createCmd LoanRequest with 
-      issuer = issuer 
+  submitMustFail issuer do
+    exerciseCmd loanRequestCid1 ApproveRequest
+
+-- owner (Akhil): $5k loan with $50k salary → 10% DTI, approved
+  loanRequestCid2 <- submit owner do
+    createCmd LoanRequest with
+      issuer = issuer
       owner = owner
-      salary = 50000.0  -- checks the loanlimit 0.25 * 50,000 = 12500
-      loanAmount = 5000.0   -- 5000 is under the limit , so Approved
-      loanLimitCid = loanLimitCid1   
+      salary = 50000.0
+      loanAmount = 5000.0
+      loanLimitCid = loanLimitCid1
 
-  loanCid2 <- submit issuer do   
-    exerciseCmd loanRequestCid2 ApproveRequest  -- creates a loan template with updated approval status
-      
--- After loan approval ,loan amount is disbursed to the token wallet 
-  disburseCid <- submit issuer do   -- only issuer** can mint tokens to the barrowers/owners wallet
-    exerciseCmd loanCid2 Disburse with   -- checks for disbursed amount, ensures it doesnt exceed the loan limit
-     disAmount = 5000.0  -- disbursed amount to the wallet 
-     tokenWalletCid = tokenCid   --  initializing on existing token balance
+  loanCid2 <- submit issuer do
+    exerciseCmd loanRequestCid2 ApproveRequest
 
-  loanLimits : [(ContractId LoanLimit, LoanLimit)] <- query @LoanLimit issuer   --  used this to fetch the active loan limit contract
-  let [(loanLimitCid5_2, _)] = [ (cid, ll) | (cid, ll) <- loanLimits, ll.totalLimit == 95000.0 ]  -- Assigned loanlimitCid5_2 where total limit equals to 95000.00 
+-- Disburse $5k into the wallet
+  _disburseCid <- submit issuer do
+    exerciseCmd loanCid2 Disburse with
+      disAmount = 5000.0
+      tokenWalletCid = tokenCid
 
---  third loan request 
-  loanRequestCid3 <- submit borrower3 do    --  borrower3 requested loan
-    createCmd LoanRequest with 
-      issuer = issuer 
-      owner = borrower3
-      salary = 15000.0       --  Checks the loanlimit 0.25 * 15,000 = 3750
-      loanAmount = 2000.0    --  2000 is under the limit , so Approved
-      loanLimitCid = loanLimitCid5_2   -- Fetching this contract id from the active list of loan limit
-
-  loanCid3 <- submit issuer do  -- excercising choice and loan is approved 
-    exerciseCmd loanRequestCid3 ApproveRequest   
-
-
-  -- Fetch all active LoanLimit contracts
+-- Fetch active LoanLimit (totalLimit now 95000)
   loanLimits : [(ContractId LoanLimit, LoanLimit)] <- query @LoanLimit issuer
-  let [(loanLimitCid8_2, _)] = [ (cid, ll) | (cid, ll) <- loanLimits, ll.totalLimit == 93000.0 ]
+  let [(loanLimitCid5_2, _)] = [ (cid, ll) | (cid, ll) <- loanLimits, ll.totalLimit == 95000.0 ]
 
-  -- Fourth loan request 
-  loanRequestCid4 <- submit borrower4 do   -- for reference suubmitted by borrower4
-    createCmd LoanRequest with 
-      issuer = issuer 
+-- borrower3 (Bheema): $2k loan with $15k salary → 13.3% DTI, approved
+  loanRequestCid3 <- submit borrower3 do
+    createCmd LoanRequest with
+      issuer = issuer
+      owner = borrower3
+      salary = 15000.0
+      loanAmount = 2000.0
+      loanLimitCid = loanLimitCid5_2
+
+  _loanCid3 <- submit issuer do
+    exerciseCmd loanRequestCid3 ApproveRequest
+
+-- Fetch active LoanLimit (totalLimit now 93000)
+  loanLimits2 : [(ContractId LoanLimit, LoanLimit)] <- query @LoanLimit issuer
+  let [(loanLimitCid8_2, _)] = [ (cid, ll) | (cid, ll) <- loanLimits2, ll.totalLimit == 93000.0 ]
+
+-- borrower4 (shashi): $50k loan with $25k salary → 200% DTI, must fail
+  loanRequestCid4 <- submit borrower4 do
+    createCmd LoanRequest with
+      issuer = issuer
       owner = borrower4
       salary = 25000.0
-      loanAmount = 50000.0 -- Its not under the limit so rejected
-      loanLimitCid = loanLimitCid8_2   -- Fetching this contract id from the active list of loan limit
+      loanAmount = 50000.0
+      loanLimitCid = loanLimitCid8_2
 
+  submitMustFail issuer do
+    exerciseCmd loanRequestCid4 ApproveRequest
 
-  loanCid4 <- submit issuer do 
-    exerciseCmd loanRequestCid4 ApproveRequest    -- when u exercise this choice , it is updated in the loan contract and updated status 
- 
-
- -- 3. Initializing the repayRestriction with minimum pay equals zero
+-- Bank policy: 5% minimum payment. One restriction reusable across loans.
   restrictionCid <- submit issuer do
     createCmd LoanRepaymentRestriction with
       issuer = issuer
       owner = owner
-      minimumPay = 0.0
-      loanCid = disburseCid   -- using active contract of loan cid which is stored in disburese cid
+      minimumPercent = 0.05
 
-  updatedRestrictionCid <- submit issuer do  -- when exercised , the minimum payment will be updated based on the owner of the contract 
-    exerciseCmd restrictionCid MinimumPayment    -- the minimumpayment will be automatically updated
+-- Find the disbursed Loan contract for the owner
+  activeLoans : [(ContractId Loan, Loan)] <- query @Loan issuer
+  let [(newLoanCid, _)] =
+        [ (cid, loan)
+        | (cid, loan) <- activeLoans
+        , loan.owner == owner && loan.disbursedAmount == 5000.0
+        ]
 
--- Fetching the active loans
-  activeLoans : [(ContractId Loan, Loan)] <- query @Loan issuer 
+-- Find the owner's current wallet
+  activeTokenWallets : [(ContractId TokenWallet, TokenWallet)] <- query @TokenWallet owner
+  let [(updatedTokenCid, _)] =
+        [ (cid, tw) | (cid, tw) <- activeTokenWallets, tw.owner == owner ]
 
- -- Find the new loan 
-  let [(newLoanCid, _)] =[ (cid, loan) | (cid, loan) <- activeLoans, loan.owner == owner && loan.disbursedAmount == 5000.0 ] 
+-- Repayment 1: $500 (>= 5% of $5000 = $250)
+  (loanCidOpt1, walletCid1, newLoanLimitCid) <- submit owner do
+    exerciseCmd newLoanCid Repay with
+      repay = 500.0
+      tokenWalletCid = updatedTokenCid
+      repaymentRestrictionCid = restrictionCid
+      loanLimitCid = loanLimitCid8_2
 
-
---Fetching the active token wallets 
-  activeTokenWallets : [(ContractId TokenWallet , TokenWallet)] <- query @TokenWallet owner
-
-  let [(updatedTokenCid, _)] = [ (cid, tw) | (cid, tw) <- activeTokenWallets, tw.owner == owner ]
-
-  loanLimits : [(ContractId LoanLimit, LoanLimit)] <- query @LoanLimit issuer
-  let [(loanLimitforFutureCid, _)] = [ (cid, ll) | (cid, ll) <- loanLimits, ll.totalLimit == 93000.0 ]
- 
- -- Loan Repayments starts from here
-  (loanCid1, walletCid1, newLoanLimitCid ) <- submit owner do -- Fetching all the updated contracts , it will be easy to make other transactions
-    exerciseCmd newLoanCid Repay with 
-      repay = 500.0    -- repaying 500 , debits  from the tokenwallet , updates the loancontract and loanlimit using the loanrequest template .
-      tokenWalletCid = updatedTokenCid  
-      repaymentRestrictionCid = updatedRestrictionCid
-      loanLimitCid = loanLimitforFutureCid 
-
-  let veryNewCid = case loanCid1 of   -- using (Option contractid Loan) we need to make sure , the active contract is saved on veryNewCid
+  let veryNewCid = case loanCidOpt1 of
         Some cid -> cid
-        None     -> error "Unexpected: loan fully repaid on first payment"      
+        None     -> error "Unexpected: loan fully repaid on first payment"
 
-  (loanCid2, walletCid2, newLoanLimitCid2) <- submit owner do  -- lets make a new transaction and returns all the three active contracts 
-    exerciseCmd  veryNewCid Repay with  -- performing on the active loancid which is veryNewCid and exercising the repay choice
-      repay = 800.0  -- 2nd choice is Exercised with the amount 800.0 and this is morethen the minAmount. underlimit dosenot exercise because the condition We wrote in the Daml file We get the assertMsg if tried lessthen minimumAmount
+-- Repayment 2: $800
+  (loanCidOpt2, walletCid2, newLoanLimitCid2) <- submit owner do
+    exerciseCmd veryNewCid Repay with
+      repay = 800.0
       tokenWalletCid = walletCid1
-      repaymentRestrictionCid = updatedRestrictionCid 
+      repaymentRestrictionCid = restrictionCid
       loanLimitCid = newLoanLimitCid
 
-  let veryNewCid2 = case loanCid2 of   -- saving the new loan cid in veryNewCid2
+  let veryNewCid2 = case loanCidOpt2 of
         Some cid -> cid
-        None     -> error "Unexpected: loan fully repaid on first payment"  
-        
-  (loanCid3, walletCid3, newLoanLimitCid3) <- submit owner do   -- here payed the remaining payment towards loan , so the loan contract should archive
-    exerciseCmd veryNewCid2 Repay with 
+        None     -> error "Unexpected: loan fully repaid on second payment"
+
+-- Repayment 3: $3700 closes out the loan ($500 + $800 + $3700 = $5000)
+-- Loan archives; LoanLimit restored from 93000 → 98000.
+  (_loanCidOpt3, _walletCid3, _newLoanLimitCid3) <- submit owner do
+    exerciseCmd veryNewCid2 Repay with
       repay = 3700.0
       tokenWalletCid = walletCid2
-      repaymentRestrictionCid = updatedRestrictionCid   
+      repaymentRestrictionCid = restrictionCid
       loanLimitCid = newLoanLimitCid2
-   -- after the no new active loan contract is created because in the Daml file the condition of DisbursedAmount == repaidAmount so the Loan Contract is Archieved
+
   return ()

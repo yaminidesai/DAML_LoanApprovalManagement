@@ -22,11 +22,11 @@ Repayment works the same way. The borrower repays in increments, each subject to
 
 The project is structured as three progressive modules. Each one is self-contained — they don't import from each other — but each builds conceptually on the previous.
 
-**LoanApproval** is the foundation. It handles the request and decision flow: borrower creates a `LoanRequest`, bank approves or rejects it, a `Loan` contract is created with the resulting status. The 25% income cap is enforced here as a contract assertion.
+**LoanApproval** is the foundation. It handles the request and decision flow: borrower creates a `LoanRequest` (including their stated salary), bank approves or rejects it, a `Loan` contract is created with the resulting status. The 25% debt-to-income cap is enforced as an `assertMsg` inside `ApproveRequest` — an over-DTI request cannot produce an Approved loan. The bank can still archive an application explicitly via `RejectRequest`, which records a Rejected loan for audit.
 
 **TokenDisbursement** adds the financial infrastructure. Introduces `TokenWallet` (account-based balance tracking), `LoanLimit` (bank-wide lending capacity), and a `Disburse` choice on the `Loan` contract. The bank can disburse in tranches; each tranche is checked against the approved amount. The bank-wide limit tracks total outstanding exposure across all borrowers simultaneously — closer in spirit to a credit concentration limit than a per-borrower limit (the per-borrower statutory limit is a separate concept governed by 12 USC 84).
 
-**LoanRepayment** closes the loop. Adds `repaidAmount` tracking to the `Loan` contract, a `LoanRepaymentRestriction` template for the minimum payment rule, and the `Repay` choice. When `repaidAmount` equals `disbursedAmount`, the contract returns `None` and archives. Partial repayments return `Some newLoanCid` — the updated loan contract — so the caller always has the current active contract reference.
+**LoanRepayment** closes the loop. Adds `repaidAmount` tracking to the `Loan` contract, a `LoanRepaymentRestriction` template for the minimum payment policy (stored as a percentage, reusable across all of a borrower's loans), and the `Repay` choice. When `repaidAmount` reaches `disbursedAmount` the contract archives and capacity is returned to `LoanLimit`. Partial repayments return `Some newLoanCid` and leave `LoanLimit` untouched, so available headroom only reflects loans that have actually closed.
 
 ---
 
@@ -42,7 +42,10 @@ The income-based eligibility check runs inside `ApproveRequest` as an assertion.
 The `Repay` choice returns `Optional (ContractId Loan)` rather than always returning a new contract. `None` means fully repaid and archived. `Some cid` means partial repayment, here is your new active contract. This forces the caller to handle both cases explicitly — you can't accidentally use a stale contract ID after full repayment because the old one no longer exists on the ledger.
 
 **LoanRepaymentRestriction fetched at runtime**
-The minimum payment rule lives in a separate `LoanRepaymentRestriction` contract rather than being hardcoded into `Loan`. The bank creates it once and it's fetched each time `Repay` is exercised. In principle, the bank could update the restriction contract to change the policy without touching the loan contract itself.
+The minimum payment rule lives in a separate `LoanRepaymentRestriction` contract rather than being hardcoded into `Loan`. The restriction stores `minimumPercent` (e.g. 0.05 for 5%) and is not tied to any specific loan — one restriction per borrower covers every loan they have. `Repay` fetches the restriction at execution time and computes the per-loan minimum as `minimumPercent * disbursedAmount`, so a bank policy change is a single contract update, not a per-loan migration.
+
+**Typed status, not free-text**
+`Loan.status` is a `LoanStatus` ADT (`Approved | Rejected`), not a string. A typo no longer compiles, and pattern matches on status get exhaustiveness checking.
 
 ---
 
@@ -60,13 +63,13 @@ A few specific things this prevents:
 
 ## Testing
 
-Three DAML Script files, one per module. These are workflow demonstration scripts — they walk through the full lifecycle with real party allocations and show that the contracts behave correctly. They do not use `assertMsg` to verify outcomes, so they won't fail if something unexpected happens. Think of them as executable walkthroughs, not automated tests.
+Three DAML Script files, one per module. These are workflow demonstration scripts — they walk through the full lifecycle with real party allocations. Failure cases (over-DTI requests, over-limit requests) use `submitMustFail`, so the scripts *do* fail if those assertions stop firing. They still don't use `assertMsg` to spot-check intermediate state (balances, totals after each step), so they're closer to executable walkthroughs than full property tests. Run with `daml test`.
 
-**LoanScript** — approves one loan request, rejects another, leaves a third as pending (the approval is intentionally commented out to demonstrate that state).
+**LoanScript** — approves one loan request, rejects another via `RejectRequest`, leaves a third as a pending `LoanRequest` (no decision exercised).
 
-**TokenDisbScript** — four loan requests against a shared lending limit, one disbursement into a token wallet. Shows how the `totalLimit` decrements across multiple borrowers.
+**TokenDisbScript** — one approved loan ($5k disbursed), one over-DTI request rejected via `submitMustFail`, two more approved against the shared `totalLimit`. Shows how the pool decrements across multiple borrowers.
 
-**LoanRepaymentscript** — the most complete. Four loan requests, one disbursement, repayment restriction created, then three repayments ($500 → $800 → $3700) until the loan archives. Demonstrates the `Optional (ContractId Loan)` handling — each repayment saves the new contract ID before passing it to the next.
+**LoanRepaymentscript** — the most complete. One disbursement, a reusable restriction created once, then three repayments ($500 → $800 → $3700) on a $5,000 disbursement until the loan archives and the pool is restored from $93,000 to $98,000. Demonstrates the `Optional (ContractId Loan)` handling — each partial repayment saves the new contract ID before passing it to the next.
 
 ---
 
@@ -74,9 +77,9 @@ Three DAML Script files, one per module. These are workflow demonstration script
 
 These are worth knowing upfront.
 
-The scripts are workflow demos, not assertion-based tests. If a contract is created with wrong data, the script won't fail — it will just continue. Adding `assertMsg` checks to verify state after each step would make them proper tests.
+The scripts assert on failure cases (`submitMustFail`) but don't spot-check intermediate state with `assertMsg` — e.g. they don't verify that `totalLimit` is exactly `98000.0` after the loan archives. Adding those would make them proper property tests.
 
-Each module redefines `TokenWallet` and `LoanLimit` locally. They aren't imported from a shared module. This means the three modules are not interoperable as written — the types are structurally identical but are different DAML modules. A cleaner design would extract shared types into a common module.
+Each module redefines `TokenWallet`, `LoanLimit`, and `LoanStatus` locally. They aren't imported from a shared module. This means the three modules are not interoperable as written — the types are structurally identical but are different DAML modules. A cleaner design would extract shared types into a common module.
 
 Contract keys are used on `TokenWallet` in the repayment module (keyed by `owner`). Contract keys were removed in DAML 3.x. If this project is migrated to 3.x, those would need to be replaced with ContractId-based lookups.
 

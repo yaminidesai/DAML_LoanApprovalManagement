@@ -1,6 +1,12 @@
-module LoanRepayment where 
+module LoanRepayment where
 
--- 1. TokenWallet Template  — Account-Based Model
+-- LoanStatus
+--   Typed status replaces the previous status : Text field. A typo like
+--   "Approvd" no longer compiles.
+data LoanStatus = Approved | Rejected
+  deriving (Eq, Show)
+
+-- 1. TokenWallet Template — Account-Based Model
 --
 -- FINANCIAL CONTEXT:
 --   Same custodial account model as Module 2. Holds the borrower's
@@ -11,340 +17,272 @@ module LoanRepayment where
 --   balance fails the Debit assertion before any state changes are committed.
 --
 -- SIGNATORIES: issuer, owner
---   Dual signatories for the same reason as Module 2: the wallet
---   represents a custodial relationship between the bank (issuer) and
---   the borrower (owner). Neither can open or close the account without
---   the other's co-authorization.
+--   Dual signatories: custodial relationship between bank and borrower.
 --
 -- OBSERVERS: none
---   The borrower's wallet balance is private to the two contracting
---   parties. No other borrower or third party can observe the balance.
+--   The borrower's wallet balance is private to the two contracting parties.
 --
 -- COMPLIANCE:
 --   GDPR Article 5(1)(c) — data minimization. Wallet balance data is
---   scoped to the minimum necessary parties: the issuing institution
---   and the account holder.
+--   scoped to the minimum necessary parties.
 --
 -- MIGRATION NOTE:
---   This template uses a contract key (keyed by owner) for potential
---   fetchByKey lookup. Contract keys are not supported in DAML 3.x
---   LF 2.1. The key is not actively used in the current repayment
---   scripts — wallet ContractIds are tracked off-ledger and passed
---   explicitly to each choice. A future refactor targeting DAML 3.x
---   should remove the key and maintainer fields and evaluate the
---   Participant Query Store as the recommended replacement pattern
---   for wallet lookups by owner.
-template TokenWallet -- Created a Token Wallet account, so the funds will be Deposited and Transfered from here.
-  with 
+--   Uses a contract key (keyed by owner) for fetchByKey lookup. Contract
+--   keys are not supported in DAML 3.x LF 2.1. The key is not actively
+--   used in the current repayment scripts — wallet ContractIds are tracked
+--   off-ledger and passed explicitly to each choice. A future refactor
+--   targeting DAML 3.x should remove the key and evaluate the Participant
+--   Query Store as the recommended replacement pattern.
+template TokenWallet
+  with
     owner : Party
-    issuer  : Party
-    tokenAmount  : Decimal -- This is the Token balance of the wallet
+    issuer : Party
+    tokenAmount : Decimal
   where
-    signatory issuer, owner  -- Both parties have access to the TokenWallet
-    key owner : Party  
-    maintainer key   -- used to fetch the owner party by fetch by key, not used in here, used for future use
+    signatory issuer, owner
+    key owner : Party
+    maintainer key
 
-    choice Credit : ContractId  TokenWallet -- Add funds to the TokenWallet
+    choice Credit : ContractId TokenWallet
       with
-        amount : Decimal 
-      controller  issuer  -- only issuer has the authority to add balance to the owners account , owner shouldn't have access to this choice
-        do 
-        assertMsg "The amount should be positive" (amount > 0.0) -- Make sures the amount entered is Positive.
-        create this with 
-          tokenAmount = tokenAmount + amount -- Updates the Account Balance by adding the amount 
+        amount : Decimal
+      controller issuer
+        do
+          assertMsg "The amount should be positive" (amount > 0.0)
+          create this with
+            tokenAmount = tokenAmount + amount
 
-    choice Debit : ContractId TokenWallet -- Deducts amount from the TokenWallet
-      with 
-        amount : Decimal 
-      controller  owner   -- only owner can send funds to a different account
-        do 
-        assertMsg "Insufficient balance" (amount <= tokenAmount) -- Make sures the requested amount is in the account.
-        assertMsg " Sent amount should be greater than zero" ( amount > 0.0) -- Make sure the amount is more than zero.
-        create this with 
-          tokenAmount = tokenAmount - amount -- Deducts the funds from thwe account and updates
-                 
--- 2. Loan Limit Template
+    choice Debit : ContractId TokenWallet
+      with
+        amount : Decimal
+      controller owner
+        do
+          assertMsg "Insufficient balance" (amount <= tokenAmount)
+          assertMsg "Sent amount should be greater than zero" (amount > 0.0)
+          create this with
+            tokenAmount = tokenAmount - amount
+
+-- 2. LoanLimit Template
 --
 -- FINANCIAL CONTEXT:
---   Extends the Module 2 LoanLimit with repayment recovery logic.
---   Adds an owner observer field and the AddRepaidAmount choice, which
---   increments totalLimit each time a borrower makes a repayment.
---   This closes the lending lifecycle: when a loan is fully repaid,
---   the bank's total lending capacity is restored to the level it was
---   at before that loan was approved. The result is a self-balancing
---   credit pool — the bank's available lending headroom on the ledger
---   always reflects the net of approvals minus repayments.
+--   Extends the Module 2 LoanLimit with end-of-loan capacity restoration.
+--   The totalLimit decrements by loanAmount on approval (CheckLimit). It
+--   only increases again when a loan is fully repaid and the Repay choice
+--   archives the Loan contract — at that point RestoreCapacity returns
+--   the full disbursedAmount to the pool. Partial repayments do not
+--   restore capacity; the bank's available headroom only reflects loans
+--   that have actually closed.
 --
 -- SIGNATORIES: issuer
---   The bank controls lending capacity as an internal institutional
---   resource. Only the bank can set the total limit, approve loans
---   that draw from it, and restore it upon repayment.
+--   The bank controls lending capacity as an internal institutional resource.
 --
 -- OBSERVERS: owner
---   The borrower is added as an observer in this module (not present
---   in Module 2) so they can fetch the LoanLimit ContractId as needed
---   for the repayment workflow. In DAML, a party must be a stakeholder
---   to reference a contract in a transaction. The observer relationship
---   gives the borrower just enough visibility to participate in
---   repayment without granting any control over the limit itself.
+--   The borrower is added as an observer so they can reference and
+--   exercise on this contract from within the Repay flow on the Loan
+--   contract (which is owner-controlled).
 --
 -- COMPLIANCE:
---   FDIC Interagency Guidelines for Credit Concentration Risk — the
---   AddRepaidAmount choice models the restoration of lending capacity
---   as loans are repaid, maintaining accurate on-ledger representation
---   of the bank's net credit exposure at all times.
---   12 USC 84 (OCC Legal Lending Limit) — the totalLimit here
---   complements the per-borrower statutory cap by tracking aggregate
---   institutional exposure rather than individual borrower concentration.
-template LoanLimit -- Based on the Individuals Income
-  with 
+--   FDIC Interagency Guidelines for Credit Concentration Risk — capacity
+--   restoration on loan archive maintains accurate on-ledger representation
+--   of the bank's net credit exposure.
+--   12 USC 84 (OCC Legal Lending Limit) — totalLimit tracks aggregate
+--   institutional exposure, complementary to the per-borrower statutory cap.
+template LoanLimit
+  with
     issuer : Party
     owner : Party
-    --salary : Decimal -- Asking Income
-    loanLimit : Decimal  -- Considered as Limit for a individual person
-    loanRequested : Decimal --  Considered as a Requested loan amount by a person
-    totalLimit : Decimal --  Total Predefined amount set by the Bank
+    loanLimit : Decimal
+    loanRequested : Decimal
+    totalLimit : Decimal
   where
-    signatory issuer  -- only bank can control the limits
-    observer owner -- In the future use, observer is owner because owner should fetch the details
+    signatory issuer
+    observer owner
 
-    choice CheckLimit : ContractId LoanLimit -- Updates the loanLimit and totalLimit
+    choice CheckLimit : ContractId LoanLimit
       with
         loanAmount : Decimal
         salary : Decimal
-      controller issuer -- Bank is the Controller
+      controller issuer
         do
-        assertMsg "The amount should be 25% of the Salary" (loanAmount <= 0.25 * salary) -- checking the requested loan is 25% of the salary
-        assertMsg "Loan Limit Exceded" (loanAmount <= totalLimit) -- checking the requested amount is under the total loan limit
-        create this with
-          loanLimit = 0.25 * salary --  Gives the Loanlimit amount for a individual
-          totalLimit = totalLimit - loanAmount -- Updates the totalLimit after each LoanApproval
-          loanRequested = loanAmount  -- Updated with the loan amount
-    
-    choice AddRepaidAmount: ContractId LoanLimit  -- Everytime the owner excercise the repay choice it also updates the total limit
-      with 
-        repay : Decimal
-      controller issuer   -- only issuer have the authority
-      do 
-      create this with 
-        totalLimit = totalLimit + repay    -- Updates total limit each time.
+          assertMsg "Loan must be within 25% of the salary"
+            (loanAmount <= 0.25 * salary)
+          assertMsg "Loan Limit Exceeded" (loanAmount <= totalLimit)
+          create this with
+            loanLimit = 0.25 * salary
+            totalLimit = totalLimit - loanAmount
+            loanRequested = loanAmount
+
+    -- Restores lending capacity to the pool. Exercised once, when a Loan
+    -- is fully repaid and about to archive, with the loan's disbursedAmount.
+    choice RestoreCapacity : ContractId LoanLimit
+      with
+        amount : Decimal
+      controller issuer
+        do
+          assertMsg "Restore amount must be positive" (amount > 0.0)
+          create this with
+            totalLimit = totalLimit + amount
 
 -- 3. LoanRequest Template
 --
 -- FINANCIAL CONTEXT:
---   Same income-based eligibility check as Module 2, extended to
---   initialize the repaidAmount field on the resulting Loan contract.
---   The ApproveRequest choice validates the 25% debt-to-income ratio,
---   exercises CheckLimit on the LoanLimit contract to atomically reduce
---   the bank's lending pool, and creates a Loan with repaidAmount = 0.0
---   ready for the repayment lifecycle. Rejected loans are also created
---   with repaidAmount initialized, maintaining a consistent contract
---   shape across both outcomes.
+--   Same shape as Module 2: borrower submits salary + amount; ApproveRequest
+--   asserts the 25% DTI rule and exercises CheckLimit. A failing request
+--   aborts the transaction rather than silently producing a Rejected
+--   loan. Explicit rejections go through RejectRequest.
 --
 -- SIGNATORIES: owner (borrower)
---   The borrower signs the application, committing their stated income
---   and requested amount as an on-ledger record. This supports the
---   lender's documentation obligation under the CFPB Ability-to-Repay
---   rule — the borrower's income representation is captured at
---   application time and cannot be retroactively altered.
---
 -- OBSERVERS: issuer (bank)
---   The bank observes the request in order to exercise the approval
---   choice. It does not sign at this stage — observation reflects
---   the bank's review role before committing to a credit decision.
 --
 -- COMPLIANCE:
---   CFPB Ability-to-Repay (Regulation Z) — the 25% salary cap
---   assertion inside ApproveRequest enforces income-based eligibility
---   at the ledger interpreter level. A request that fails the ratio
---   check produces a Rejected loan rather than throwing an error,
---   creating an auditable record of both outcomes.
---   BSA Section 1020.220 — the owner party represents the identified
---   loan applicant whose identity must be verified before credit is
---   extended under Customer Identification Program requirements.
-template LoanRequest -- Borrower requests the loan
-  with 
-    loanLimitCid : ContractId LoanLimit   -- checking the Loan LoanLimit
-    issuer : Party 
+--   CFPB Ability-to-Repay (Regulation Z) — DTI assertion is the contract
+--   gate on loan creation.
+--   BSA Section 1020.220 — borrower party = identified loan applicant.
+template LoanRequest
+  with
+    loanLimitCid : ContractId LoanLimit
+    issuer : Party
     owner : Party
-    salary : Decimal -- Takes salary as input
-    loanAmount : Decimal -- Takes input as loanAmount
-    
+    salary : Decimal
+    loanAmount : Decimal
   where
-    signatory owner  -- owner requests the loan so owner is signatory
-    observer issuer  -- issuer acts as observer
-    
-    choice ApproveRequest : ContractId Loan -- Choice to accept the Request
-      controller issuer   -- Only issuer can perform this action 
+    ensure loanAmount > 0.0 && salary > 0.0
+    signatory owner
+    observer issuer
+
+    choice ApproveRequest : ContractId Loan
+      controller issuer
       do
-      -- Validating the loan limit by taking input salary and loan amount calculating with loan limit template
-      let isValid = loanAmount <= 0.25 * salary 
-      if isValid then do
-      _ <- exercise loanLimitCid CheckLimit with 
-        salary = salary
-        loanAmount = loanAmount  
-      create Loan with   -- creates loan if loan request is under the loan limit
-        issuer 
-        owner 
-        loanAmount = loanAmount
-        disbursedAmount = 0.0
-        status = "Approved" -- If Approved status Changed to Approved
-        repaidAmount = 0.0
-      else 
-       create Loan with  -- if the loan request amount is over the loanlimit
-         issuer
-         owner 
-         loanAmount = loanAmount
-         disbursedAmount = 0.0
-         status = "Rejected"  -- Updates status as rejected
-         repaidAmount = 0.0
+        assertMsg "Loan exceeds 25% of stated salary (CFPB Ability-to-Repay)"
+          (loanAmount <= 0.25 * salary)
+        _ <- exercise loanLimitCid CheckLimit with
+          salary = salary
+          loanAmount = loanAmount
+        create Loan with
+          issuer
+          owner
+          loanAmount
+          disbursedAmount = 0.0
+          status = Approved
+          repaidAmount = 0.0
 
-
+    choice RejectRequest : ContractId Loan
+      controller issuer
+      do
+        create Loan with
+          issuer
+          owner
+          loanAmount
+          disbursedAmount = 0.0
+          status = Rejected
+          repaidAmount = 0.0
 
 -- 4. Loan Template
 --
 -- FINANCIAL CONTEXT:
---   The fully featured loan contract covering approval, disbursement,
---   and repayment in a single template. Adds repaidAmount to track
---   cumulative repayments against disbursedAmount. The Repay choice
---   is the heart of this module: it validates the repayment amount
---   against the minimum threshold (fetched from LoanRepaymentRestriction),
---   debits the borrower's wallet, updates the bank's lending capacity,
---   and either creates a new loan contract with updated repaidAmount
---   (partial repayment) or archives the contract entirely (full repayment).
---   The Optional (ContractId Loan) return type forces the caller to
---   handle both outcomes explicitly — there is no way to accidentally
---   hold a stale ContractId after full repayment.
+--   Approval, disbursement, and repayment in a single template.
+--   repaidAmount tracks cumulative repayments against disbursedAmount.
+--   The Repay choice validates against a runtime-fetched minimum payment
+--   threshold (computed from LoanRepaymentRestriction.minimumPercent *
+--   disbursedAmount), debits the borrower's wallet, and either updates
+--   the loan with the new repaidAmount (partial) or archives the contract
+--   and restores capacity to the LoanLimit pool (full). The Optional
+--   ContractId Loan return type forces the caller to handle both outcomes.
 --
 -- SIGNATORIES: issuer, owner
---   Both parties co-sign for the same reasons as Module 2: the loan
---   is a bilateral credit agreement. The borrower's co-signature means
---   the Repay choice can only be exercised by the borrower — the bank
---   cannot force repayment, and the borrower cannot repay more than
---   was disbursed.
---
 -- OBSERVERS: none
---   No third-party observers. Loan balance, repayment history, and
---   disbursement status are private to the contracting parties.
 --
 -- COMPLIANCE:
---   CFPB Regulation Z — Disburse asserts (disbursedAmount + disAmount
---   <= loanAmount), preventing over-disbursement at the contract level.
---   FDIC Credit Concentration Guidelines — repaidAmount + Repay's
---   AddRepaidAmount call maintain accurate net exposure on the LoanLimit
---   contract in real time across the full repayment lifecycle.
---   GDPR Article 5(1)(c) — no observers beyond the two contracting
---   parties; repayment history is not broadcast to third parties.
-template Loan  -- This is a Loan Template created after the Request Approved or Rejected
+--   CFPB Regulation Z — disbursement and repayment limits are enforced
+--   as contract assertions; over-disbursement and below-minimum repayment
+--   are structurally impossible.
+--   FDIC Credit Concentration Guidelines — capacity is restored to
+--   LoanLimit only on full repayment, keeping net exposure accurate.
+template Loan
   with
     issuer : Party
     owner : Party
-    loanAmount : Decimal   -- Approved loan amount
-    disbursedAmount: Decimal
-    status : Text
-    repaidAmount : Decimal  -- repaid amount updates here
+    loanAmount : Decimal
+    disbursedAmount : Decimal
+    status : LoanStatus
+    repaidAmount : Decimal
   where
-    signatory issuer, owner  -- agreement between issuer and owner
+    signatory issuer, owner
 
-    choice Disburse : ContractId Loan  -- disbursing the approved amount into toekn wallet
+    choice Disburse : ContractId Loan
       with
-        disAmount : Decimal 
-        tokenWalletCid : ContractId TokenWallet  -- tokenwallet contract address
+        disAmount : Decimal
+        tokenWalletCid : ContractId TokenWallet
       controller issuer
       do
-        assertMsg "Disbursement Amount must be positive" (disAmount > 0.0)   -- checking if the disburse amount is greater than zero
-        assertMsg "Disbuesement exceds remaining limit" (disbursedAmount + disAmount <= loanAmount)  -- ensuring disbursed amount doesnt exceed the loan amount
-        _ <- exercise tokenWalletCid Credit with amount = disAmount   -- exercisng the credit choice in tokenwallet
-        create this with 
-         disbursedAmount = disbursedAmount + disAmount -- updating the disburse amount in loan contract
+        assertMsg "Disbursement Amount must be positive" (disAmount > 0.0)
+        assertMsg "Disbursement exceeds remaining limit"
+          (disbursedAmount + disAmount <= loanAmount)
+        _ <- exercise tokenWalletCid Credit with amount = disAmount
+        create this with
+          disbursedAmount = disbursedAmount + disAmount
 
-    choice Repay : (Optional(ContractId Loan), ContractId TokenWallet, ContractId LoanLimit)  -- repay choice, Have used optional , as if the totaldisbursment is equals the repaid amount it should archive or update the loan contract.
-      with 
-        repay : Decimal  -- input 
-        tokenWalletCid : ContractId TokenWallet  -- updates after each choice is exercised
-        repaymentRestrictionCid : ContractId LoanRepaymentRestriction   -- used to fetch the loan repayment restriction
-        loanLimitCid : ContractId LoanLimit  
+    choice Repay : (Optional (ContractId Loan), ContractId TokenWallet, ContractId LoanLimit)
+      with
+        repay : Decimal
+        tokenWalletCid : ContractId TokenWallet
+        repaymentRestrictionCid : ContractId LoanRepaymentRestriction
+        loanLimitCid : ContractId LoanLimit
+      controller owner
+      do
+        repayRestriction <- fetch repaymentRestrictionCid
+        let minimumPay = repayRestriction.minimumPercent * disbursedAmount
+        assertMsg "Repayment must be >= minimumPercent * disbursedAmount"
+          (repay >= minimumPay)
+        assertMsg "Repayment must not exceed outstanding balance"
+          (repaidAmount + repay <= disbursedAmount)
 
-      controller owner -- owner executes the choice
-      do 
-        repayRestriction <- fetch repaymentRestrictionCid   -- to fetch minimum pay from the loanRepaymentRestriction template
-        assertMsg "Repayment amount should be greater than or equal to minimumAmount" (repay >= repayRestriction.minimumPay )  -- checking repay amount is grater than minimum pay
-        assertMsg "Repayment amount should not exceed the disbursedAmount" (repaidAmount + repay <= disbursedAmount)  -- repayment should not exceed the disbursed amount
-        newWalletCid <- exercise tokenWalletCid Debit with amount = repay  -- deducts funds from the token wallet
-        newLimitCid <- exercise loanLimitCid AddRepaidAmount  with repay = repay -- Adding the repayed amount to the total limit in loanlimit contract
-  
-      -- Very Important to archive the contract , if repaid amount equals disbursed amount archive contract, else create a new contract
+        newWalletCid <- exercise tokenWalletCid Debit with amount = repay
+
         let newRepaid = repaidAmount + repay
-        if newRepaid == disbursedAmount then
+        if newRepaid >= disbursedAmount then do
+          -- Full repayment: restore the disbursed amount to the lending
+          -- pool and let the Loan contract archive.
+          newLimitCid <- exercise loanLimitCid RestoreCapacity
+            with amount = disbursedAmount
           return (None, newWalletCid, newLimitCid)
         else do
-         --  new Loan contract is created with updated amount 
+          -- Partial repayment: update the loan, keep LoanLimit untouched.
           newLoanCid <- create this with
             repaidAmount = newRepaid
-          return (Some newLoanCid, newWalletCid, newLimitCid)   -- Some newloanCid is a value of type contractid , that states a partial repayment occured .
-   
+          return (Some newLoanCid, newWalletCid, loanLimitCid)
+
 -- 5. LoanRepaymentRestriction Template
 --
 -- FINANCIAL CONTEXT:
---   Represents the bank's minimum repayment policy as a standalone
---   contract fetched at runtime by the Loan.Repay choice. The minimum
---   payment is set to 5% of the disbursed amount, calculated when the
---   bank exercises MinimumPayment after disbursement. Storing this
---   policy in a separate contract rather than hardcoding it into the
---   Loan template has a specific operational advantage: the bank can
---   update the restriction contract to reflect a new policy — say,
---   changing the threshold from 5% to 3% during a borrower hardship
---   program — without redeploying the Loan contract. The Repay choice
---   always fetches the current restriction at execution time, so policy
---   changes take effect on the next repayment without any contract
---   migration. This is a meaningful design choice for financial
---   institutions that need to adjust repayment policies in response
---   to regulatory guidance, economic conditions, or customer circumstances.
+--   Bank-set minimum repayment policy expressed as a percentage of
+--   disbursedAmount (e.g. 0.05 for 5%). Stored as a standalone contract
+--   so the bank can update policy without redeploying Loan templates,
+--   and so a single restriction applies to any number of loans for the
+--   given borrower. Repay fetches this contract and computes the
+--   per-loan minimum at execution time using the loan's own
+--   disbursedAmount — so a borrower with multiple loans uses one
+--   restriction across all of them.
 --
 -- SIGNATORIES: issuer
---   The bank is the sole signatory because minimum repayment thresholds
---   are a unilateral bank policy, not a bilateral agreement. The borrower
---   does not negotiate the minimum — it is set by the institution and
---   enforced against them. Bank-only signatory reflects this correctly.
+--   Minimum repayment thresholds are unilateral bank policy.
 --
 -- OBSERVERS: owner
---   The borrower is an observer so they can see the minimum repayment
---   requirement that applies to their loan. Transparency about the
---   minimum payment threshold is a basic consumer protection expectation
---   and consistent with CFPB disclosure principles — borrowers should
---   know what the minimum acceptable payment is before attempting to repay.
+--   The borrower observes so they can reference the contract from inside
+--   the owner-controlled Repay choice.
 --
 -- COMPLIANCE:
 --   CFPB Ability-to-Repay (Regulation Z) — minimum repayment enforcement
---   prevents micro-payments that do not meaningfully reduce the outstanding
---   balance, protecting the integrity of the repayment schedule and the
---   bank's ability to recover the disbursed funds within a reasonable term.
---   The runtime fetch design supports regulatory flexibility: if supervisory
---   guidance requires a change to minimum payment calculations, the bank
---   can update the restriction without a ledger upgrade.
+--   prevents micro-payments that don't meaningfully reduce the balance.
+--   Storing the threshold as a percent (not a per-loan absolute) means
+--   updating bank policy is a single contract update, not a per-loan
+--   migration.
 template LoanRepaymentRestriction
   with
     issuer : Party
-    owner : Party    -- 
-    minimumPay :Decimal   -- Saving minimum pay 
-    loanCid :  ContractId Loan    
+    owner : Party
+    minimumPercent : Decimal
   where
+    ensure minimumPercent > 0.0 && minimumPercent <= 1.0
     signatory issuer
-    observer owner   -- owner is used , because owner should fetch the minimum loan repayment from here , to use it in the loanrepay
-
-    nonconsuming choice MinimumPayment : ContractId LoanRepaymentRestriction   -- Non consuming choice , The minimum payment will not change untill the full loan repayment
-      controller issuer    -- controlled by the issuer 
-      do 
-        loan <- fetch loanCid  -- To check the disbursed amount, fetching the loan contract
-        create this with 
-          minimumPay =  0.05 * loan.disbursedAmount   -- checking directly through the disburse amount as this will not change dynamically, this is the minimum amount which is 5 percent of the disbursed amount.
-
-
-
-
-        
-    
-
-
-
-
+    observer owner

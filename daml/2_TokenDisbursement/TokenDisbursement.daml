@@ -1,10 +1,17 @@
-module TokenDisbursement where 
+module TokenDisbursement where
+
+-- LoanStatus
+--   Typed status replaces the previous status : Text field. Using an ADT
+--   means a typo like "Approvd" no longer compiles, and pattern matching
+--   on status is exhaustive-checked by the compiler.
+data LoanStatus = Approved | Rejected
+  deriving (Eq, Show)
+
 -- 1. TokenWallet Template
 --
 -- FINANCIAL CONTEXT:
 --   Represents an account-based token wallet that holds a borrower's
---   disbursed loan balance. Models the bank account into which approved
---   loan funds are deposited. The issuer credits funds on disbursement;
+--   disbursed loan balance. The issuer credits funds on disbursement;
 --   the owner debits funds when spending or repaying. The separation of
 --   credit (issuer-controlled) and debit (owner-controlled) mirrors the
 --   real-world model where a bank deposits funds into a customer account
@@ -14,15 +21,11 @@ module TokenDisbursement where
 --   Both parties co-sign the wallet because it represents a custodial
 --   relationship — the issuer holds and manages the funds, the owner
 --   has the right to the balance. Dual signatories prevent either party
---   from unilaterally creating or closing the account. The issuer cannot
---   open a wallet on behalf of a borrower without their authorization,
---   and the owner cannot self-issue a funded wallet.
+--   from unilaterally creating or closing the account.
 --
 -- OBSERVERS: none
 --   No third-party observers. The wallet balance is private to the
---   account holder and the issuing institution. This reflects standard
---   bank account confidentiality — account balances are not visible to
---   other parties absent a legal order.
+--   account holder and the issuing institution.
 --
 -- COMPLIANCE:
 --   GDPR Article 5(1)(c) — data minimization. The wallet is visible only
@@ -30,41 +33,34 @@ module TokenDisbursement where
 --   CFPB Regulation Z — the issuer-controlled Credit choice ensures funds
 --   can only be added by the lending institution as part of an approved
 --   disbursement, not self-credited by the borrower.
---
--- MIGRATION NOTE:
---   This template uses a pattern that would benefit from contract keys in
---   DAML 2.x. In DAML 3.x LF 2.1, contract keys are not supported. The
---   current implementation relies on off-ledger tracking of contract IDs.
---   A future refactor should evaluate the Participant Query Store as the
---   recommended replacement pattern.
-template TokenWallet -- Created a Token Wallet account, so the funds will be Deposited and Transfered from here.
-  with 
+template TokenWallet
+  with
     owner : Party
-    issuer  : Party
-    tokenAmount  : Decimal -- This is the Token balance of the wallet
+    issuer : Party
+    tokenAmount : Decimal
   where
-    signatory issuer, owner  -- Both parties have access to the TokenWallet
+    signatory issuer, owner
 
-    choice Credit : ContractId  TokenWallet -- Add funds to the TokenWallet
+    choice Credit : ContractId TokenWallet
       with
-        amount : Decimal 
-      controller  issuer
-        do 
-        assertMsg "The amount should be positive" (amount > 0.0) -- Make sures the amount entered is Positive.
-        create this with 
-          tokenAmount = tokenAmount + amount -- Updates the Account Balance by adding the amount 
+        amount : Decimal
+      controller issuer
+        do
+          assertMsg "The amount should be positive" (amount > 0.0)
+          create this with
+            tokenAmount = tokenAmount + amount
 
-    choice Debit : ContractId TokenWallet -- Deducts amount from the TokenWallet
-      with 
-        amount : Decimal 
-      controller  owner
-        do 
-        assertMsg "Insufficient balance" (amount <= tokenAmount) -- Make sures the requested amount is in the account.
-        assertMsg " Sent amount should be greater than zero" ( amount > 0.0) -- Make sure the amount is more than zero.
-        create this with 
-          tokenAmount = tokenAmount - amount -- Deducts the funds from thwe account and updates
-                 
--- 2. Loan Limit Template
+    choice Debit : ContractId TokenWallet
+      with
+        amount : Decimal
+      controller owner
+        do
+          assertMsg "Insufficient balance" (amount <= tokenAmount)
+          assertMsg "Sent amount should be greater than zero" (amount > 0.0)
+          create this with
+            tokenAmount = tokenAmount - amount
+
+-- 2. LoanLimit Template
 --
 -- FINANCIAL CONTEXT:
 --   Represents the bank's credit concentration control — a bank-wide
@@ -78,47 +74,40 @@ template TokenWallet -- Created a Token Wallet account, so the funds will be Dep
 --
 -- SIGNATORIES: issuer
 --   The bank is the sole signatory because lending capacity is an
---   institutional asset that the bank alone controls. Borrowers have no
---   legal claim over the bank's internal capital allocation decisions.
---   The bank sets, updates, and enforces its own concentration limits
---   as a matter of internal credit policy.
+--   institutional asset that the bank alone controls.
 --
 -- OBSERVERS: none
---   No observers. The bank's total lending capacity and internal limits
---   are proprietary credit risk data. Exposing this to borrowers would
---   reveal how much aggregate lending headroom the bank has — competitively
---   sensitive information that borrowers have no right to see.
+--   The bank's total lending capacity and internal limits are
+--   proprietary credit risk data and not visible to borrowers.
 --
 -- COMPLIANCE:
 --   FDIC Interagency Guidelines for Credit Concentration Risk — the
---   totalLimit field implements a portfolio-level concentration control,
---   consistent with supervisory guidance that banks maintain internal
---   limits on credit concentrations relative to capital.
+--   totalLimit field implements a portfolio-level concentration control.
 --   12 USC 84 (OCC Legal Lending Limit) — acknowledged as the statutory
 --   per-borrower cap; the totalLimit here models the bank's internal
 --   aggregate capacity, a complementary but distinct control.
-template LoanLimit -- Based on the Individuals Income
-  with 
+template LoanLimit
+  with
     issuer : Party
-    --salary : Decimal -- Asking Income
-    loanLimit : Decimal  -- Considered as Limit for a individual person
-    loanRequested : Decimal --  Considered as a Requested loan amount by a person
-    totalLimit : Decimal --  Total Predefined amount set by the Bank
+    loanLimit : Decimal
+    loanRequested : Decimal
+    totalLimit : Decimal
   where
-    signatory issuer  -- only bank can control the limits
+    signatory issuer
 
-    choice CheckLimit : ContractId LoanLimit -- Updates the loanLimit and totalLimit
+    choice CheckLimit : ContractId LoanLimit
       with
         loanAmount : Decimal
         salary : Decimal
-      controller issuer -- Bank is the Controller
+      controller issuer
         do
-        assertMsg "The amount should be 25% of the Salary" (loanAmount <= 0.25 * salary) -- checking the requested loan is 25% of the salary
-        assertMsg "Loan Limit Exceded" (loanAmount <= totalLimit) -- checking the requested amount is under the total loan limit
-        create this with
-          loanLimit = 0.25 * salary --  Gives the Loanlimit amount for a individual
-          totalLimit = totalLimit - loanAmount -- Updates the totalLimit after each LoanApproval
-          loanRequested = loanAmount  -- Updated with the loan amount
+          assertMsg "Loan must be within 25% of the salary"
+            (loanAmount <= 0.25 * salary)
+          assertMsg "Loan Limit Exceeded" (loanAmount <= totalLimit)
+          create this with
+            loanLimit = 0.25 * salary
+            totalLimit = totalLimit - loanAmount
+            loanRequested = loanAmount
 
 -- 3. LoanRequest Template
 --
@@ -126,12 +115,11 @@ template LoanLimit -- Based on the Individuals Income
 --   Extends the basic loan application from Module 1 with income-based
 --   eligibility verification and integration with the bank's lending
 --   capacity limit. The borrower provides their salary alongside the
---   requested amount; the ApproveRequest choice validates that the
---   loan does not exceed 25% of salary and exercises the LoanLimit's
---   CheckLimit choice to atomically deduct from the bank's total pool.
---   This implements the CFPB Ability-to-Repay principle at the contract
---   level — the eligibility check cannot be skipped or overridden by
---   application code.
+--   requested amount. ApproveRequest asserts the 25% DTI rule and
+--   exercises CheckLimit on the LoanLimit contract; a request that fails
+--   either check aborts the transaction. Explicit rejections (for any
+--   non-DTI reason) go through RejectRequest, which produces an audit
+--   record without consuming lending capacity.
 --
 -- SIGNATORIES: owner (borrower)
 --   The borrower signs the request, committing their stated income and
@@ -142,51 +130,50 @@ template LoanLimit -- Based on the Individuals Income
 -- OBSERVERS: issuer (bank)
 --   The bank observes the request to evaluate and exercise the approval
 --   choice. It does not co-sign the request because it has not yet made
---   a credit decision — observation without signature reflects the bank's
---   review role at this stage.
+--   a credit decision.
 --
 -- COMPLIANCE:
 --   CFPB Ability-to-Repay (Regulation Z) — the 25% debt-to-income check
 --   inside ApproveRequest enforces income-based lending eligibility as a
---   contract assertion. If the borrower's stated salary does not support
---   the requested amount, the choice fails at the interpreter level.
+--   contract assertion. A failing request cannot produce an Approved loan.
 --   BSA Section 1020.220 (Customer Identification Program) — the owner
---   party represents the identified loan applicant; in a production
---   system this would be linked to a verified identity record.
-template LoanRequest -- Borrower requests the loan
-  with 
-    loanLimitCid : ContractId LoanLimit   -- checking the Loan LoanLimit
-    issuer : Party 
+--   party represents the identified loan applicant.
+template LoanRequest
+  with
+    loanLimitCid : ContractId LoanLimit
+    issuer : Party
     owner : Party
-    salary : Decimal -- Takes salary as input
-    loanAmount : Decimal -- Takes input as loanAmount
-    
+    salary : Decimal
+    loanAmount : Decimal
   where
-    signatory owner  -- owner requests the loan so owner is signatory
-    observer issuer  -- issuer acts as observer
-    
-    choice ApproveRequest : ContractId Loan -- Choice to accept the Request
-      controller issuer   -- Only issuer can perform this action 
+    ensure loanAmount > 0.0 && salary > 0.0
+    signatory owner
+    observer issuer
+
+    choice ApproveRequest : ContractId Loan
+      controller issuer
       do
-      -- Validating the loan limit by taking input salary and loan amount calculating with loan limit template
-      let isValid = loanAmount <= 0.25 * salary 
-      if isValid then do
-      _ <- exercise loanLimitCid CheckLimit with 
-        salary = salary
-        loanAmount = loanAmount  
-      create Loan with   -- creates loan if loan request is under the loan limit
-        issuer 
-        owner 
-        loanAmount = loanAmount
-        disbursedAmount = 0.0
-        status = "Approved" -- If Approved status Changed to Approved
-      else 
-       create Loan with  -- if the loan request amount is over the loanlimit
-         issuer
-         owner 
-         loanAmount = loanAmount
-         disbursedAmount = 0.0
-         status = "Rejected"  -- Updates status as rejected
+        assertMsg "Loan exceeds 25% of stated salary (CFPB Ability-to-Repay)"
+          (loanAmount <= 0.25 * salary)
+        _ <- exercise loanLimitCid CheckLimit with
+          salary = salary
+          loanAmount = loanAmount
+        create Loan with
+          issuer
+          owner
+          loanAmount
+          disbursedAmount = 0.0
+          status = Approved
+
+    choice RejectRequest : ContractId Loan
+      controller issuer
+      do
+        create Loan with
+          issuer
+          owner
+          loanAmount
+          disbursedAmount = 0.0
+          status = Rejected
 
 -- 4. Loan Template
 --
@@ -196,55 +183,39 @@ template LoanRequest -- Borrower requests the loan
 --   been released into the borrower's wallet. The Disburse choice allows
 --   the bank to release funds incrementally — each tranche is validated
 --   against the approved loanAmount before the Credit choice on the
---   TokenWallet is exercised. This models the real-world practice of
---   staged loan disbursement, common in construction loans, revolving
---   credit facilities, and milestone-based lending.
+--   TokenWallet is exercised.
 --
 -- SIGNATORIES: issuer, owner
---   Both parties co-sign the loan agreement. The issuer's signature
---   represents the bank's credit decision and commitment to disburse
---   up to the approved amount. The owner's signature represents the
---   borrower's acceptance of the loan terms. Neither can unilaterally
---   modify the loan record after creation.
+--   Both parties co-sign the loan agreement.
 --
 -- OBSERVERS: none
---   No third-party observers. Loan terms and disbursement status are
---   private to the contracting parties. The borrower's outstanding
---   balance is not visible to other borrowers or external parties.
+--   Loan terms and disbursement status are private to the contracting parties.
 --
 -- COMPLIANCE:
 --   CFPB Regulation Z — the Disburse choice assertion
 --   (disbursedAmount + disAmount <= loanAmount) enforces that total
---   disbursement never exceeds the approved credit limit. This is a
---   contract-level control that cannot be bypassed by repeated calls.
+--   disbursement never exceeds the approved credit limit.
 --   FDIC Credit Concentration Guidelines — the disbursedAmount field
---   provides on-ledger visibility into actual funds released, supporting
---   the bank's internal exposure tracking against the LoanLimit contract.
-template Loan  -- This is a Loan Template created after the Request Approved or Rejected
+--   provides on-ledger visibility into actual funds released.
+template Loan
   with
     issuer : Party
     owner : Party
     loanAmount : Decimal
-    disbursedAmount: Decimal
-    status : Text
+    disbursedAmount : Decimal
+    status : LoanStatus
   where
-    signatory issuer, owner  -- agreement between issuer and owner
+    signatory issuer, owner
 
-    choice Disburse : ContractId Loan  -- disbursing the approved amount into toekn wallet
+    choice Disburse : ContractId Loan
       with
-        disAmount : Decimal 
-        tokenWalletCid : ContractId TokenWallet  -- tokenwallet contract address
+        disAmount : Decimal
+        tokenWalletCid : ContractId TokenWallet
       controller issuer
       do
-        assertMsg "Disbursement Amount must be positive" (disAmount > 0.0)   -- checking if the disburse amount is greater than zero
-        assertMsg "Disbuesement exceds remaining limit" (disbursedAmount + disAmount <= loanAmount)  -- ensuring disbursed amount doesnt exceed the loan amount
-        _ <- exercise tokenWalletCid Credit with amount = disAmount   -- exercisng the credit choice in tokenwallet
-        create this with 
-         disbursedAmount = disbursedAmount + disAmount -- updating the disburse amount in loan contract
-      
-    
-
-
-
-
-
+        assertMsg "Disbursement Amount must be positive" (disAmount > 0.0)
+        assertMsg "Disbursement exceeds remaining limit"
+          (disbursedAmount + disAmount <= loanAmount)
+        _ <- exercise tokenWalletCid Credit with amount = disAmount
+        create this with
+          disbursedAmount = disbursedAmount + disAmount

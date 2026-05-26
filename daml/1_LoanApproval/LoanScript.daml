@@ -1,52 +1,45 @@
 module LoanScript where
 
-import Daml.Script  -- Importing Daml.Script library for Flow Stimulation 
-import LoanApproval --  Importing the LoanApproval Daml File
+import Daml.Script
+import LoanApproval
 
 test_loan : Script ()
-test_loan = script do 
+test_loan = script do
 
---  Party allocation bank, borrower, borrower2, borrower3 
-  bank <- allocateParty "Goldman Sachs" 
-  borrower <- allocateParty "Yami" 
+-- Party allocation
+  bank <- allocateParty "Goldman Sachs"
+  borrower <- allocateParty "Yami"
   borrower2 <- allocateParty "Akhil"
   borrower3 <- allocateParty "Bheema"
 
--- borrower(Yami) submits the LoanRequest with loanAmount = 1000.0
-  loanRequest <- submit borrower do 
-    createCmd LoanRequest with 
+-- Yami: $1000 loan, $5000 salary → 20% DTI, approved
+  loanRequest <- submit borrower do
+    createCmd LoanRequest with
       bank = bank
       borrower = borrower
+      salary = 5000.0
       loanAmount = 1000.0
 
---bank(Goldman Sachs) exercises the approveRequest choice and the  loan request approved
-  loan <- submit bank do 
-    exerciseCmd loanRequest ApproveRequest      
+  _loan <- submit bank do
+    exerciseCmd loanRequest ApproveRequest
 
--- borrower2(Akhil) submits the LoanRequest with loanAmount = 1000000.0
+-- Akhil: $1,000,000 loan, $50,000 salary → bank rejects explicitly
   loanRequest2 <- submit borrower2 do
-    createCmd LoanRequest with 
+    createCmd LoanRequest with
       bank = bank
       borrower = borrower2
-      loanAmount = 1000000.0 
+      salary = 50000.0
+      loanAmount = 1000000.0
 
---bank(Goldman Sachs) exercises the RejectRequest choice and  the loanrequest rejected 
-  loan2 <- submit bank do 
-    exerciseCmd loanRequest2 RejectRequest      
+  _loan2 <- submit bank do
+    exerciseCmd loanRequest2 RejectRequest
 
--- borrower3(Bheema) submits the LoanRequest with loanAmount = 100.0
-  loanRequest3 <- submit borrower3 do
-    createCmd LoanRequest with 
+-- Bheema: $100 loan, $1000 salary → request left unprocessed (demonstrates pending)
+  _loanRequest3 <- submit borrower3 do
+    createCmd LoanRequest with
       bank = bank
       borrower = borrower3
-      loanAmount = 100.0    
-
---   loan3 <- submit bank do 
---     exerciseCmd loanRequest3 ApproveRequest
-
+      salary = 1000.0
+      loanAmount = 100.0
 
   return ()
-
-
-
-
